@@ -8217,15 +8217,35 @@ async fn show_slots_for_user(
     if username.contains('+') {
         return show_dynamic_group_slots(&state, &headers, &username, &slug, &query).await;
     }
-    let lang = crate::i18n::detect_from_headers(&headers);
-    let et: Option<(String, String, String, Option<String>, i32, i32, i32, i32, String, Option<String>, String, String, Option<String>, Option<String>, String, String)> = sqlx::query_as(
-        "SELECT et.id, et.slug, et.title, et.description, et.duration_min, et.buffer_before, et.buffer_after, et.min_notice_min, et.location_type, et.location_value, u.id, u.name, u.title, u.avatar_path, et.visibility, et.default_calendar_view
-         FROM event_types et
-         JOIN accounts a ON a.id = et.account_id
-         JOIN users u ON u.id = a.user_id
-         WHERE u.username = ? AND et.slug = ? AND et.enabled = 1 AND u.enabled = 1",
+
+    let user: Option<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT id, name, title, avatar_path, language FROM users WHERE username = ? AND enabled = 1",
     )
     .bind(&username)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+
+    let (host_user_id, host_name, host_title, host_avatar_path, user_lang) = match user {
+        Some(user) => user,
+        None => return Html("User not found.".to_string()),
+    };
+
+    let lang = crate::i18n::resolve(user_lang.as_deref(), &headers);
+
+    let et: Option<(String, String, String, Option<String>, i32, i32, i32, i32, String, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT et.id, et.slug, et.title, et.description, et.duration_min, et.buffer_before, et.buffer_after, et.min_notice_min, et.location_type, et.location_value, et.visibility, et.default_calendar_view
+         FROM event_types et
+         JOIN accounts a ON a.id = et.account_id
+         WHERE a.user_id = ? AND et.slug = ? AND et.enabled = 1",
+    )
+    .bind(&host_user_id)
     .bind(&slug)
     .fetch_optional(&state.pool)
     .await
@@ -8242,10 +8262,6 @@ async fn show_slots_for_user(
         min_notice,
         loc_type,
         loc_value,
-        host_user_id,
-        host_name,
-        host_title,
-        host_avatar_path,
         visibility,
         default_calendar_view,
     ) = match et {
@@ -8410,9 +8426,9 @@ async fn show_book_form_for_user(
     if username.contains('+') {
         return show_dynamic_group_book_form(&state, &headers, &username, &slug, &query).await;
     }
-    let lang = crate::i18n::detect_from_headers(&headers);
-    let et: Option<(String, String, String, Option<String>, i32, String, Option<String>, String, i32)> = sqlx::query_as(
-        "SELECT et.id, et.slug, et.title, et.description, et.duration_min, et.location_type, et.location_value, et.visibility, et.max_additional_guests
+
+    let et: Option<(String, String, String, Option<String>, i32, String, Option<String>, String, i32, Option<String>)> = sqlx::query_as(
+        "SELECT et.id, et.slug, et.title, et.description, et.duration_min, et.location_type, et.location_value, et.visibility, et.max_additional_guests, u.language
          FROM event_types et
          JOIN accounts a ON a.id = et.account_id
          JOIN users u ON u.id = a.user_id
@@ -8434,10 +8450,13 @@ async fn show_book_form_for_user(
         loc_value,
         visibility,
         max_additional_guests,
+        user_lang,
     ) = match et {
         Some(e) => e,
         None => return Html("Event type not found.".to_string()),
     };
+
+    let lang = crate::i18n::resolve(user_lang.as_deref(), &headers);
 
     // Validate invite token for private event types
     let invite_guest_name;
@@ -8544,7 +8563,6 @@ async fn handle_booking_for_user(
     if let Err(resp) = verify_csrf_token(&headers, &form._csrf) {
         return resp;
     }
-    let lang = crate::i18n::detect_from_headers(&headers);
     if username.contains('+') {
         return handle_dynamic_group_booking(&state, &headers, &username, &slug, &form).await;
     }
@@ -8566,8 +8584,8 @@ async fn handle_booking_for_user(
         return Html(e).into_response();
     }
 
-    let et: Option<(String, String, String, i32, i32, i32, i32, i32, String, Option<String>, String, Option<i32>, String, i32)> = sqlx::query_as(
-        "SELECT et.id, et.slug, et.title, et.duration_min, et.buffer_before, et.buffer_after, et.min_notice_min, et.requires_confirmation, et.location_type, et.location_value, u.id, et.reminder_minutes, et.visibility, et.max_additional_guests
+    let et: Option<(String, String, String, i32, i32, i32, i32, i32, String, Option<String>, String, Option<i32>, String, i32, Option<String>)> = sqlx::query_as(
+        "SELECT et.id, et.slug, et.title, et.duration_min, et.buffer_before, et.buffer_after, et.min_notice_min, et.requires_confirmation, et.location_type, et.location_value, u.id, et.reminder_minutes, et.visibility, et.max_additional_guests, u.language
          FROM event_types et
          JOIN accounts a ON a.id = et.account_id
          JOIN users u ON u.id = a.user_id
@@ -8594,10 +8612,13 @@ async fn handle_booking_for_user(
         reminder_min,
         visibility,
         max_additional_guests,
+        user_lang,
     ) = match et {
         Some(e) => e,
         None => return Html("Event type not found.".to_string()).into_response(),
     };
+
+    let lang = crate::i18n::resolve(user_lang.as_deref(), &headers);
     let needs_approval = requires_confirmation != 0;
 
     // Parse additional guests
