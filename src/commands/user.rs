@@ -72,24 +72,19 @@ pub async fn run(pool: &SqlitePool, data_dir: &Path, cmd: UserCommands) -> Resul
                 anyhow::bail!("Password must be at least 8 characters");
             }
 
-            // First user is always admin
-            let is_first = !auth::has_any_users(pool).await?;
-            let role = if admin || is_first { "admin" } else { "user" };
-
             let password_hash = auth::hash_password(&password)?;
             let user_id = Uuid::new_v4().to_string();
             let username = auth::generate_username(pool, &email).await?;
 
-            sqlx::query(
-                "INSERT INTO users (id, email, name, timezone, password_hash, role, auth_provider, username) VALUES (?, ?, ?, 'UTC', ?, ?, 'local', ?)",
+            let role = auth::create_local_user(
+                pool,
+                &user_id,
+                &email,
+                &name,
+                &password_hash,
+                &username,
+                admin,
             )
-            .bind(&user_id)
-            .bind(&email)
-            .bind(&name)
-            .bind(&password_hash)
-            .bind(role)
-            .bind(&username)
-            .execute(pool)
             .await?;
 
             // Link to existing account (e.g. from old `calrs init`) or create a new one
@@ -128,10 +123,10 @@ pub async fn run(pool: &SqlitePool, data_dir: &Path, cmd: UserCommands) -> Resul
                 role
             );
 
-            if is_first {
+            if role == "admin" && !admin {
                 println!(
                     "{}",
-                    "  First user — automatically granted admin role.".dimmed()
+                    "  First user, automatically granted admin role.".dimmed()
                 );
             }
         }
@@ -389,6 +384,51 @@ mod tests {
         .unwrap();
 
         user_id
+    }
+
+    /// Wrapper around `auth::create_local_user` that handles the bookkeeping
+    /// the production handler also handles (UUID, password hash, username).
+    /// Calls the same helper the `Create` command uses, so the atomic CASE
+    /// in the production code path is what's actually under test.
+    async fn create_user_returning_role(pool: &SqlitePool, email: &str, admin: bool) -> String {
+        let user_id = Uuid::new_v4().to_string();
+        let password_hash = crate::auth::hash_password("testpass123").unwrap();
+        let username = crate::auth::generate_username(pool, email).await.unwrap();
+        crate::auth::create_local_user(
+            pool,
+            &user_id,
+            email,
+            "Test",
+            &password_hash,
+            &username,
+            admin,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn first_user_create_gets_admin_role_atomically() {
+        let pool = setup_db().await;
+        let role = create_user_returning_role(&pool, "first@test.com", false).await;
+        assert_eq!(role, "admin");
+    }
+
+    #[tokio::test]
+    async fn subsequent_user_create_gets_user_role() {
+        let pool = setup_db().await;
+        insert_user(&pool, "first@test.com", "First", "admin").await;
+        let role = create_user_returning_role(&pool, "second@test.com", false).await;
+        assert_eq!(role, "user");
+    }
+
+    #[tokio::test]
+    async fn explicit_admin_flag_overrides_user_role() {
+        // `--admin` flag set + existing users: the operator's choice wins.
+        let pool = setup_db().await;
+        insert_user(&pool, "first@test.com", "First", "admin").await;
+        let role = create_user_returning_role(&pool, "second@test.com", true).await;
+        assert_eq!(role, "admin");
     }
 
     #[tokio::test]
