@@ -16563,38 +16563,59 @@ mod tests {
     /// asserted from a test. Used to pin the contract that the sanitization
     /// helpers actually log the underlying detail; a future refactor that
     /// drops the log call would cause this test to fail.
+    ///
+    /// Uses a hand-rolled minimal `Subscriber` instead of
+    /// `tracing_subscriber::fmt`. The fmt layer's per-event writer plumbing
+    /// proved flaky under `cargo tarpaulin` (events occasionally landed in a
+    /// dropped buffer), and we don't need the formatting machinery here:
+    /// recording field names + their `Debug` strings is enough to assert that
+    /// the event carried the expected markers.
     fn capture_tracing<F: FnOnce()>(f: F) -> String {
-        use std::io::Write;
         use std::sync::{Arc, Mutex};
-        use tracing_subscriber::fmt::MakeWriter;
+        use tracing::field::{Field, Visit};
+        use tracing::{Event, Metadata, Subscriber};
 
         #[derive(Clone)]
-        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
-        impl Write for SharedBuf {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
+        struct Buf(Arc<Mutex<String>>);
+
+        struct Recorder {
+            buf: Arc<Mutex<String>>,
         }
-        impl<'a> MakeWriter<'a> for SharedBuf {
-            type Writer = SharedBuf;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
+        impl Subscriber for Recorder {
+            fn enabled(&self, _: &Metadata<'_>) -> bool {
+                true
             }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &Event<'_>) {
+                struct V<'a>(&'a Mutex<String>);
+                impl<'a> Visit for V<'a> {
+                    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                        use std::fmt::Write;
+                        let mut s = self.0.lock().unwrap();
+                        let _ = write!(s, "{}={:?} ", field.name(), value);
+                    }
+                    fn record_str(&mut self, field: &Field, value: &str) {
+                        use std::fmt::Write;
+                        let mut s = self.0.lock().unwrap();
+                        let _ = write!(s, "{}={} ", field.name(), value);
+                    }
+                }
+                event.record(&mut V(&self.buf));
+                self.buf.lock().unwrap().push('\n');
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
         }
 
-        let buf = SharedBuf(Arc::new(Mutex::new(Vec::new())));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(buf.clone())
-            .with_max_level(tracing::Level::ERROR)
-            .with_ansi(false)
-            .finish();
+        let buf = Buf(Arc::new(Mutex::new(String::new())));
+        let subscriber = Recorder { buf: buf.0.clone() };
         tracing::subscriber::with_default(subscriber, f);
-        let bytes = buf.0.lock().unwrap().clone();
-        String::from_utf8(bytes).unwrap()
+        let s = buf.0.lock().unwrap().clone();
+        s
     }
 
     #[test]
