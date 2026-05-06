@@ -17,7 +17,7 @@ Listing a maintainer here does **not** transfer commit rights, it sets the expec
 |---|---|---|
 | BlueMind | [@olivierlambert](https://github.com/olivierlambert) | Primary test target. |
 | Nextcloud | _(seeking maintainer)_ | Used by some users; no dedicated owner. |
-| Google Calendar | _(pending confirmation, see #99)_ | OAuth2 path added by [@bboles](https://github.com/bboles). |
+| Google Calendar | [@bboles](https://github.com/bboles) | OAuth2 path added in #99. |
 | SOGo | _(seeking maintainer)_ | Not personally tested by the project lead. |
 | Zimbra | _(seeking maintainer)_ | Not personally tested by the project lead. |
 | Radicale | _(seeking maintainer)_ | Not personally tested by the project lead. |
