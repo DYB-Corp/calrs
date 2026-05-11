@@ -8,7 +8,7 @@ use axum::Router;
 use chrono::{
     Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone, Timelike, Utc,
 };
-use chrono_tz::Tz;
+use chrono_tz::{OffsetName, Tz};
 use minijinja::{context, Environment};
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -479,6 +479,115 @@ fn format_booking_range(start_str: &str, end_str: &str) -> String {
     } else {
         format!("{} — {}", start_label, end_str)
     }
+}
+
+/// Convert a naive datetime from one timezone to another, going via UTC. Used
+/// when the dashboard needs to show a stored time (which is naive in the
+/// event-type's timezone) in either the host's profile timezone or the guest's
+/// selected timezone.
+fn convert_naive_between_tz(naive: NaiveDateTime, from: Tz, to: Tz) -> NaiveDateTime {
+    let utc = from
+        .from_local_datetime(&naive)
+        .earliest()
+        .unwrap_or_else(|| from.from_utc_datetime(&naive))
+        .with_timezone(&Utc);
+    utc.with_timezone(&to).naive_local()
+}
+
+/// Short timezone label for display next to a time, e.g. "CEST" or "EST".
+/// Falls back to the IANA name when the abbreviation is numeric (zones like
+/// Asia/Tehran which expose "+0330" rather than a letter code).
+fn tz_short_label(tz: Tz, at: NaiveDateTime) -> String {
+    let dt = tz
+        .from_local_datetime(&at)
+        .earliest()
+        .unwrap_or_else(|| tz.from_utc_datetime(&at));
+    let abbr = dt.offset().abbreviation();
+    if abbr.len() >= 3 && abbr.chars().all(|c| c.is_ascii_alphabetic()) {
+        abbr.to_string()
+    } else {
+        tz.name().to_string()
+    }
+}
+
+/// Format a booking range for dashboard display: returns a primary label in the
+/// host's profile timezone (with tz suffix), and an optional secondary label
+/// showing the guest's view when the two timezones differ.
+///
+/// `start_str`/`end_str` are naive datetimes stored in `stored_tz` (the event
+/// type's timezone, falling back to the host's profile tz for legacy rows).
+fn format_booking_for_dashboard(
+    start_str: &str,
+    end_str: &str,
+    stored_tz: &str,
+    host_tz: &str,
+    guest_tz: &str,
+) -> (String, Option<String>) {
+    let stored = stored_tz.parse::<Tz>().unwrap_or(Tz::UTC);
+    let host = host_tz.parse::<Tz>().unwrap_or(Tz::UTC);
+    let guest = guest_tz.parse::<Tz>().unwrap_or(Tz::UTC);
+
+    let (start, end) = match (
+        parse_booking_datetime(start_str),
+        parse_booking_datetime(end_str),
+    ) {
+        (Some(s), Some(e)) => (s, e),
+        _ => return (format_booking_range(start_str, end_str), None),
+    };
+
+    let host_start = convert_naive_between_tz(start, stored, host);
+    let host_end = convert_naive_between_tz(end, stored, host);
+    let today_host = Utc::now().with_timezone(&host).date_naive();
+    let primary = format_dashboard_range(
+        host_start,
+        host_end,
+        today_host,
+        &tz_short_label(host, host_start),
+    );
+
+    let secondary = if guest != host {
+        let g_start = convert_naive_between_tz(start, stored, guest);
+        let g_end = convert_naive_between_tz(end, stored, guest);
+        let g_time_start = g_start.time().format("%-I:%M %p").to_string();
+        let g_time_end = g_end.time().format("%-I:%M %p").to_string();
+        Some(format!(
+            "{} — {} {}",
+            g_time_start,
+            g_time_end,
+            tz_short_label(guest, g_start)
+        ))
+    } else {
+        None
+    };
+
+    (primary, secondary)
+}
+
+fn format_dashboard_range(
+    start: NaiveDateTime,
+    end: NaiveDateTime,
+    today: NaiveDate,
+    tz_label: &str,
+) -> String {
+    let date = start.date();
+    let time_start = start.time().format("%-I:%M %p").to_string();
+    let time_end = end.time().format("%-I:%M %p").to_string();
+    let day_diff = (date - today).num_days();
+    let date_part = if day_diff == 0 {
+        "Today".to_string()
+    } else if day_diff == 1 {
+        "Tomorrow".to_string()
+    } else if (1..7).contains(&day_diff) {
+        date.format("%A").to_string()
+    } else if date.year() == today.year() {
+        date.format("%a, %b %-d").to_string()
+    } else {
+        date.format("%a, %b %-d, %Y").to_string()
+    };
+    format!(
+        "{} at {} — {} {}",
+        date_part, time_start, time_end, tz_label
+    )
 }
 
 /// Format a raw date string (YYYY-MM-DD or from datetime) into a human-friendly
@@ -1079,11 +1188,23 @@ async fn dashboard(
             .await
             .unwrap_or(0);
 
-    let pending_bookings: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
-        "SELECT b.id, b.guest_name, b.guest_email, b.start_at, b.end_at, et.title
+    let pending_bookings: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )> = sqlx::query_as(
+        "SELECT b.id, b.guest_name, b.guest_email, b.start_at, b.end_at, et.title,
+                COALESCE(NULLIF(et.timezone, ''), u.timezone) AS stored_tz,
+                COALESCE(NULLIF(b.guest_timezone, ''), 'UTC') AS guest_tz
          FROM bookings b
          JOIN event_types et ON et.id = b.event_type_id
          JOIN accounts a ON a.id = et.account_id
+         JOIN users u ON u.id = a.user_id
          WHERE a.user_id = ? AND b.status = 'pending'
          ORDER BY b.start_at",
     )
@@ -1124,11 +1245,23 @@ async fn dashboard(
         Err(e) => return internal_error_html("template render", &e),
     };
 
+    let host_tz = &user.timezone;
     let pending_ctx: Vec<minijinja::Value> = pending_bookings
         .iter()
-        .map(|(id, name, email, start, end, title)| {
-            context! { id => id, guest_name => name, guest_email => email, start_at => format_booking_range(start, end), event_title => title }
-        })
+        .map(
+            |(id, name, email, start, end, title, stored_tz, guest_tz)| {
+                let (primary, secondary) =
+                    format_booking_for_dashboard(start, end, stored_tz, host_tz, guest_tz);
+                context! {
+                    id => id,
+                    guest_name => name,
+                    guest_email => email,
+                    start_at => primary,
+                    start_at_guest => secondary,
+                    event_title => title,
+                }
+            },
+        )
         .collect();
 
     let pending_count = pending_ctx.len() as i64;
@@ -1312,11 +1445,23 @@ async fn dashboard_bookings(
 ) -> impl IntoResponse {
     let user = &auth_user.user;
 
-    let pending_bookings: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
-        "SELECT b.id, b.guest_name, b.guest_email, b.start_at, b.end_at, et.title
+    let pending_bookings: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )> = sqlx::query_as(
+        "SELECT b.id, b.guest_name, b.guest_email, b.start_at, b.end_at, et.title,
+                COALESCE(NULLIF(et.timezone, ''), u.timezone) AS stored_tz,
+                COALESCE(NULLIF(b.guest_timezone, ''), 'UTC') AS guest_tz
          FROM bookings b
          JOIN event_types et ON et.id = b.event_type_id
          JOIN accounts a ON a.id = et.account_id
+         JOIN users u ON u.id = a.user_id
          WHERE a.user_id = ? AND b.status = 'pending'
          ORDER BY b.start_at",
     )
@@ -1325,12 +1470,15 @@ async fn dashboard_bookings(
     .await
     .unwrap_or_default();
 
-    let upcoming_bookings: Vec<(String, String, String, String, String, String, i32)> =
+    let upcoming_bookings: Vec<(String, String, String, String, String, String, i32, String, String)> =
         sqlx::query_as(
-            "SELECT b.id, b.guest_name, b.guest_email, b.start_at, b.end_at, et.title, b.reschedule_by_host
+            "SELECT b.id, b.guest_name, b.guest_email, b.start_at, b.end_at, et.title, b.reschedule_by_host,
+                    COALESCE(NULLIF(et.timezone, ''), u.timezone) AS stored_tz,
+                    COALESCE(NULLIF(b.guest_timezone, ''), 'UTC') AS guest_tz
          FROM bookings b
          JOIN event_types et ON et.id = b.event_type_id
          JOIN accounts a ON a.id = et.account_id
+         JOIN users u ON u.id = a.user_id
          WHERE a.user_id = ? AND b.status = 'confirmed' AND b.start_at >= datetime('now')
          ORDER BY b.start_at
          LIMIT 50",
@@ -1340,10 +1488,14 @@ async fn dashboard_bookings(
         .await
         .unwrap_or_default();
 
-    // Claimable bookings: unclaimed bookings on event types watched by the user's teams
-    let claimable_bookings: Vec<(String, String, String, String, String, String, String, String)> =
+    // Claimable bookings: unclaimed bookings on event types watched by the user's teams.
+    // For team event types et.account_id may be null, so the timezone falls back to the
+    // event type's own tz column (always set since migration 046's backfill).
+    let claimable_bookings: Vec<(String, String, String, String, String, String, String, String, String, String)> =
         sqlx::query_as(
-            "SELECT b.id, b.guest_name, b.guest_email, b.start_at, b.end_at, et.title, t.name, bct.token \
+            "SELECT b.id, b.guest_name, b.guest_email, b.start_at, b.end_at, et.title, t.name, bct.token, \
+                    COALESCE(NULLIF(et.timezone, ''), 'UTC') AS stored_tz, \
+                    COALESCE(NULLIF(b.guest_timezone, ''), 'UTC') AS guest_tz \
              FROM bookings b \
              JOIN event_types et ON et.id = b.event_type_id \
              JOIN event_type_watchers ew ON ew.event_type_id = et.id \
@@ -1365,40 +1517,62 @@ async fn dashboard_bookings(
         Err(e) => return internal_error_html("template render", &e),
     };
 
+    let host_tz = &user.timezone;
     let claimable_ctx: Vec<minijinja::Value> = claimable_bookings
         .iter()
-        .map(|(id, name, email, start, end, title, team_name, token)| {
-            context! {
-                id => id,
-                guest_name => name,
-                guest_email => email,
-                start_at => format_booking_range(start, end),
-                event_title => title,
-                team_name => team_name,
-                claim_token => token,
-            }
-        })
+        .map(
+            |(id, name, email, start, end, title, team_name, token, stored_tz, guest_tz)| {
+                let (primary, secondary) =
+                    format_booking_for_dashboard(start, end, stored_tz, host_tz, guest_tz);
+                context! {
+                    id => id,
+                    guest_name => name,
+                    guest_email => email,
+                    start_at => primary,
+                    start_at_guest => secondary,
+                    event_title => title,
+                    team_name => team_name,
+                    claim_token => token,
+                }
+            },
+        )
         .collect();
 
     let pending_ctx: Vec<minijinja::Value> = pending_bookings
         .iter()
-        .map(|(id, name, email, start, end, title)| {
-            context! { id => id, guest_name => name, guest_email => email, start_at => format_booking_range(start, end), event_title => title }
-        })
+        .map(
+            |(id, name, email, start, end, title, stored_tz, guest_tz)| {
+                let (primary, secondary) =
+                    format_booking_for_dashboard(start, end, stored_tz, host_tz, guest_tz);
+                context! {
+                    id => id,
+                    guest_name => name,
+                    guest_email => email,
+                    start_at => primary,
+                    start_at_guest => secondary,
+                    event_title => title,
+                }
+            },
+        )
         .collect();
 
     let bookings_ctx: Vec<minijinja::Value> = upcoming_bookings
         .iter()
-        .map(|(id, name, email, start, end, title, resched)| {
-            context! {
-                id => id,
-                guest_name => name,
-                guest_email => email,
-                start_at => format_booking_range(start, end),
-                event_title => title,
-                awaiting_reschedule => *resched != 0,
-            }
-        })
+        .map(
+            |(id, name, email, start, end, title, resched, stored_tz, guest_tz)| {
+                let (primary, secondary) =
+                    format_booking_for_dashboard(start, end, stored_tz, host_tz, guest_tz);
+                context! {
+                    id => id,
+                    guest_name => name,
+                    guest_email => email,
+                    start_at => primary,
+                    start_at_guest => secondary,
+                    event_title => title,
+                    awaiting_reschedule => *resched != 0,
+                }
+            },
+        )
         .collect();
 
     let (impersonating, impersonating_name, _) = impersonation_ctx(&auth_user);
@@ -16045,6 +16219,74 @@ mod tests {
     fn format_booking_range_end_unparseable() {
         let result = format_booking_range("2099-07-20T09:00:00", "bad");
         assert_eq!(result, "Mon, Jul 20, 2099 at 9:00 AM — bad");
+    }
+
+    // --- format_booking_for_dashboard tests ---
+    //
+    // Regression for issue #100: when the event type's stored timezone differs
+    // from the host's profile timezone, the dashboard previously displayed the
+    // raw stored time with no timezone label, which the host read as their own
+    // time. The fix shifts the primary label into the host's profile tz and
+    // adds a secondary guest-tz line.
+
+    #[test]
+    fn dashboard_label_converts_stored_tz_to_host_profile_tz() {
+        // The user's exact scenario: event type set to America/New_York
+        // (UTC-5 in winter), host's profile is Europe/Paris (UTC+1 in winter),
+        // guest booked from America/New_York at 10:00 → stored as "10:00".
+        // Host should see "4:00 PM" (Paris equivalent), guest line shows "10:00 EST".
+        let (primary, secondary) = format_booking_for_dashboard(
+            "2099-01-20T10:00:00",
+            "2099-01-20T10:30:00",
+            "America/New_York",
+            "Europe/Paris",
+            "America/New_York",
+        );
+        assert!(
+            primary.contains("4:00 PM") && primary.contains("4:30 PM"),
+            "primary should be in Europe/Paris, got: {primary}"
+        );
+        assert!(
+            primary.contains("CET"),
+            "primary should label tz, got: {primary}"
+        );
+        let sec = secondary.expect("secondary line expected when guest tz differs from host tz");
+        assert!(
+            sec.contains("10:00 AM"),
+            "secondary should show guest 10:00 AM, got: {sec}"
+        );
+        assert!(
+            sec.contains("EST"),
+            "secondary should label guest tz, got: {sec}"
+        );
+    }
+
+    #[test]
+    fn dashboard_label_omits_secondary_when_guest_tz_equals_host_tz() {
+        let (_primary, secondary) = format_booking_for_dashboard(
+            "2099-07-20T14:00:00",
+            "2099-07-20T14:30:00",
+            "Europe/Paris",
+            "Europe/Paris",
+            "Europe/Paris",
+        );
+        assert!(
+            secondary.is_none(),
+            "no secondary line when host and guest share tz"
+        );
+    }
+
+    #[test]
+    fn dashboard_label_falls_back_for_unparseable_input() {
+        let (primary, secondary) = format_booking_for_dashboard(
+            "garbage",
+            "also-garbage",
+            "Europe/Paris",
+            "Europe/Paris",
+            "America/New_York",
+        );
+        assert_eq!(primary, "garbage — also-garbage");
+        assert!(secondary.is_none());
     }
 
     // --- format_date_label tests ---
