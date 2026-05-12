@@ -138,6 +138,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Estonian locale | 1.10.0 | First community-language slot added beyond the original four (English, French, Spanish, Polish, German, Italian) |
 | Admin user deletion | 1.10.0 | Admins can permanently delete users from the admin panel with cascade rules and confirmation |
 
+## [1.10.1] - 2026-05-12
+
+Patch release fixing booking-time timezone display across the dashboard, the post-booking emails, and the ICS attachments they carry. No schema changes, no behaviour changes outside the timezone-display surface.
+
+### Fixed
+
+- **Dashboard booking times now render in the host's profile timezone** (closes #100) — listings previously used the raw naive datetime stored against the event-type tz plus the server's local clock for the "Today"/"Tomorrow" label, with no tz suffix. With an event type configured in `America/New_York` and a host in `Europe/Paris`, the dashboard showed `10:00` with no qualifier and let the host believe the meeting was at 10:00 Paris time. The dashboard now reads `et.timezone` (with fallback to `users.timezone`) as the stored tz, converts to the host's profile tz, and appends a tz abbreviation. When the guest's selected tz differs, a muted secondary line shows the guest's view too so the host can see both
+- **Confirmation, decline, and cancellation emails (and their ICS attachments) now use the guest's timezone** (closes #101) — five post-booking action handlers (dashboard "Approve", email-link "Approve", dashboard "Cancel"/"Decline", email-link "Decline", guest self-cancel link) fed the event-type-local stored datetime straight into `BookingDetails`/`CancellationDetails`. Because `email::generate_ics`/`generate_cancel_ics` both call `convert_to_utc(date, start_time, end_time, guest_timezone)`, the email body, the rendered post-action page, *and* the ICS UTC came out wrong: a booking made at 16:00 Paris on a New York event type arrived in the guest's inbox as 10:00, and the CalDAV write-back landed at a different absolute time than the host saw on the dashboard. New `booking_strings_in_guest_tz()` helper converts stored times through the event-type tz to the guest tz before populating either struct. Regression tests cover both the approve and the cancel surface
+
+### Internal
+
+- 632 tests total (up from 624 in 1.10.0), all green on pre-commit
+
 ## [1.10.0] - 2026-05-04
 
 Security audit round 3 (one High, seven Mediums) plus a guest-side cancel/reschedule notice window. Also bundles two months of translation work merged from the long-lived `i18n` branch and a few self-hoster fixes that landed since 1.9.0.
