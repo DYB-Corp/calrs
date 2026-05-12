@@ -494,6 +494,39 @@ fn convert_naive_between_tz(naive: NaiveDateTime, from: Tz, to: Tz) -> NaiveDate
     utc.with_timezone(&to).naive_local()
 }
 
+/// Convert stored booking start/end (naive in `stored_tz`) to the guest's
+/// timezone and return (date, start_time, end_time) strings used to populate
+/// `BookingDetails`. `email::generate_ics` calls `convert_to_utc(date,
+/// start_time, end_time, guest_timezone)`, so these fields must be guest-local
+/// for the ICS and the rendered email body to match what the guest booked.
+/// Fixes #101.
+fn booking_strings_in_guest_tz(
+    start_at: &str,
+    end_at: &str,
+    stored_tz: Tz,
+    guest_tz: Tz,
+) -> (String, String, String) {
+    match (
+        parse_booking_datetime(start_at),
+        parse_booking_datetime(end_at),
+    ) {
+        (Some(s), Some(e)) => {
+            let gs = convert_naive_between_tz(s, stored_tz, guest_tz);
+            let ge = convert_naive_between_tz(e, stored_tz, guest_tz);
+            (
+                gs.date().format("%Y-%m-%d").to_string(),
+                gs.time().format("%H:%M").to_string(),
+                ge.time().format("%H:%M").to_string(),
+            )
+        }
+        _ => (
+            start_at.get(..10).unwrap_or(start_at).to_string(),
+            extract_time_24h(start_at),
+            extract_time_24h(end_at),
+        ),
+    }
+}
+
 /// Short timezone label for display next to a time, e.g. "CEST" or "EST".
 /// Falls back to the IANA name when the abbreviation is numeric (zones like
 /// Asia/Tehran which expose "+0330" rather than a letter code).
@@ -3710,9 +3743,13 @@ async fn confirm_booking(
 
     tracing::info!(booking_id = %bid, "booking confirmed by host");
 
-    let date = start_at.get(..10).unwrap_or(&start_at).to_string();
-    let start_time = extract_time_24h(&start_at);
-    let end_time = extract_time_24h(&end_at);
+    // start_at/end_at are naive in the event type's timezone; convert to the
+    // guest's tz so the confirmation email body and the ICS attachment match
+    // what the guest booked. See #101.
+    let stored_tz = get_host_tz(&state.pool, &et_id).await;
+    let guest_tz_parsed = guest_timezone.parse::<Tz>().unwrap_or(Tz::UTC);
+    let (date, start_time, end_time) =
+        booking_strings_in_guest_tz(&start_at, &end_at, stored_tz, guest_tz_parsed);
 
     let details = crate::email::BookingDetails {
         event_title,
@@ -12888,10 +12925,14 @@ async fn approve_booking_by_token(
 
     tracing::info!(booking_id = %bid, "booking approved via token");
 
-    let date_label = format_date_label(&start_at, lang);
-    let date = start_at.get(..10).unwrap_or(&start_at).to_string();
-    let start_time = extract_time_24h(&start_at);
-    let end_time = extract_time_24h(&end_at);
+    // start_at/end_at are naive in the event type's timezone; convert to the
+    // guest's tz so the email body and the ICS attachment match what the
+    // guest booked. See #101.
+    let stored_tz = get_host_tz(&state.pool, &event_type_id).await;
+    let guest_tz_parsed = guest_timezone.parse::<Tz>().unwrap_or(Tz::UTC);
+    let (date, start_time, end_time) =
+        booking_strings_in_guest_tz(&start_at, &end_at, stored_tz, guest_tz_parsed);
+    let date_label = format_date_label(&date, lang);
 
     // Get host email for BookingDetails
     let host_email: String =
@@ -18864,6 +18905,54 @@ mod tests {
             status.unwrap().0,
             "confirmed",
             "Booking should be confirmed via POST token"
+        );
+    }
+
+    /// Regression test for #101: when the event type's timezone differs from
+    /// the guest's timezone, approving a pending booking must render (and
+    /// email) the time in the guest's timezone, not the event-type-local time
+    /// the row was stored as.
+    #[tokio::test]
+    async fn approve_booking_renders_time_in_guest_timezone() {
+        let (app, pool, _, et_id) = setup_test_app().await;
+
+        // Event type stored in America/New_York. 10:00 NY in June (EDT, UTC-4)
+        // == 14:00 UTC == 16:00 in Europe/Paris (CEST, UTC+2).
+        sqlx::query("UPDATE event_types SET timezone = 'America/New_York' WHERE id = ?")
+            .bind(&et_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let booking_id = uuid::Uuid::new_v4().to_string();
+        let cancel_tok = uuid::Uuid::new_v4().to_string();
+        let resched_tok = uuid::Uuid::new_v4().to_string();
+        let confirm_tok = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO bookings (id, event_type_id, uid, guest_name, guest_email, guest_timezone, start_at, end_at, status, cancel_token, reschedule_token, confirm_token) VALUES (?, ?, 'uid-approve-tz', 'Guest', 'guest@test.com', 'Europe/Paris', '2026-06-20T10:00:00', '2026-06-20T10:30:00', 'pending', ?, ?, ?)")
+            .bind(&booking_id)
+            .bind(&et_id)
+            .bind(&cancel_tok)
+            .bind(&resched_tok)
+            .bind(&confirm_tok)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let response = app
+            .oneshot(post_bare(&format!("/booking/approve/{}", confirm_tok)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = body_string(response).await;
+
+        assert!(
+            body.contains("16:00") && body.contains("16:30"),
+            "Approval page should render times in the guest's tz (Europe/Paris: 16:00 – 16:30), got body fragment: {}",
+            &body[..body.len().min(2000)]
+        );
+        assert!(
+            !body.contains("10:00") && !body.contains("10:30"),
+            "Approval page should not render the event-type-local time (America/New_York: 10:00)"
         );
     }
 
