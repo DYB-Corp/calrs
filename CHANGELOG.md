@@ -137,6 +137,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Guest cancel/reschedule notice window | 1.10.0 | Per-event-type minimum lead time before a guest can self-cancel or self-reschedule via the tokenized email links; host actions from the dashboard are unaffected |
 | Estonian locale | 1.10.0 | First community-language slot added beyond the original four (English, French, Spanish, Polish, German, Italian) |
 | Admin user deletion | 1.10.0 | Admins can permanently delete users from the admin panel with cascade rules and confirmation |
+| Capped slots hidden in picker | 1.11.0 | When a frequency limit has been hit for the day/week/month/year, the slot picker skips those times instead of letting a guest pick a doomed slot |
+| Per-member booking frequency limits | 1.11.0 | Opt-in "Per team member" flag on each frequency-limit row so caps apply to individual round-robin members (e.g. 1 demo/day per person) instead of pooled team-wide |
+
+## [1.11.0] - 2026-05-22
+
+Two themes: closing the 1.10.2 sync-robustness hotfix loop (the three follow-ups filed against #105 / #106 / #107) and turning the booking-frequency-limits surface from a half-wired feature into a real one — first by hiding capped slots in the picker, then by adding per-team-member caps.
+
+### Added
+
+- **Hide booking slots when a frequency cap is reached** (closes #115, PR #116) — `compute_slots` now runs `apply_frequency_limit_filter` after slot generation: for each configured `(max, period)` it counts existing confirmed+pending bookings per containing host-local period, then drops slots that fall in any capped period. The submit-time check (`would_exceed_frequency_limit`) stays as a race-condition backstop, but the picker no longer shows times the submit-time check would reject. Limit-reached page also got proper styling (template render instead of bare `Html("...")`)
+- **Per-member booking frequency limits** (closes #117, PR #118) — new `booking_frequency_limits.per_member` flag (migration 051) so a host can express "1 demo/day per team member" instead of "1 demo/day team-wide". Threaded through three sites: `would_exceed_frequency_limit` takes `Option<&str> assigned_user_id` and scopes the count by assignee; `pick_group_member` excludes candidates already at their per-member cap so the picker doesn't route to a doomed user; `apply_frequency_limit_filter` hides a slot only when every eligible team member is at cap. UI gets a "Per team member" checkbox on each limit row, hidden on personal event types
+
+### Fixed
+
+- **CalDAV resource is HEAD-checked before cancelling a booking** (closes #105, PR #108) — sync-collection's "deleted" entries are now treated as a hint, not a verdict: before cancelling a confirmed booking we HEAD the resource href and only act if the server confirms 404. Two new regression tests (one for the BlueMind phantom-deletion case, one for the legitimate deletion case)
+- **`cancel_orphaned_booking` is scoped to its own source/account** (closes #106, PR #111) — previously did a global UID-only lookup against the bookings table, so a sync running on source A could cancel a booking whose CalDAV event lived under source B (different calendar, different account). Now joins through `event_types → accounts → caldav_sources` and only acts on rows whose source matches the one currently syncing
+- **Property-level 404s inside `<d:propstat>` are ignored** (closes #107, PR #109) — the sync-collection parser previously treated *any* 404 status code inside a `<d:response>` as a deletion, including the per-property 404 some servers emit when one of the requested DAV properties is absent on an otherwise-live resource. Parser now distinguishes resource-level status from propstat-level status and only routes resource-level 404s into the deletion handler
+- **Team event type frequency limits actually persist** (PR #114) — `edit_group_event_type_form` never queried `booking_frequency_limits`, and `create_group_event_type` / `update_group_event_type` never wrote to it. Toggling the cap on a team event type was a silent no-op. Three-way fix mirrors the working personal-event-type flow
+
+### Internal
+
+- 650 tests total (up from 634 in 1.10.2), all green on pre-commit
+- Migration 051 (`booking_frequency_limits.per_member`)
+- `render_claim_error` renamed to `render_booking_action_error` since the template (`booking_action_error.html`) isn't claim-specific
+- Coverage CI: `under_tarpaulin()` now uses `cfg!(tarpaulin)` (the previous `CARGO_TARPAULIN_VERSION` env-var check never fired, so the racy tracing-capture tests were leaking through the supposed-to-skip guard); `Cargo.toml` registers `cfg(tarpaulin)` via the `unexpected_cfgs` lint config
 
 ## [1.10.2] - 2026-05-14
 
