@@ -139,6 +139,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | Admin user deletion | 1.10.0 | Admins can permanently delete users from the admin panel with cascade rules and confirmation |
 | Capped slots hidden in picker | 1.11.0 | When a frequency limit has been hit for the day/week/month/year, the slot picker skips those times instead of letting a guest pick a doomed slot |
 | Per-member booking frequency limits | 1.11.0 | Opt-in "Per team member" flag on each frequency-limit row so caps apply to individual round-robin members (e.g. 1 demo/day per person) instead of pooled team-wide |
+| Edit CalDAV sources | 1.12.0 | Fix a typo'd URL, change a username, or rotate the password from `/dashboard/sources/{id}/edit` or `calrs source update <id-prefix>`. Empty password preserves the existing one; URL changes still pass the SSRF validator |
+| SMTP via environment variables | 1.12.0 | Configure SMTP via `CALRS_SMTP_*` env vars instead of the database, useful for container deployments. Env vars take priority over the DB; partial config errors loudly |
+| SMTP implicit TLS (port 465) | 1.12.0 | New `tls_mode` column (`starttls`/`tls`) supports port 465 without the prior STARTTLS hang. Applies to both env-var and DB-configured SMTP |
+| Team event type permission cleanup | 1.12.0 | Personal event-type mutation routes can't be reached via team URLs and vice versa; centralised through `can_manage_event_type` / `find_manageable_event_type_by_slug` with 8 new regression tests covering the manageability matrix |
+
+## [1.12.0] - 2026-05-24
+
+A modernization pass on operator-facing surfaces: source connection details are now editable instead of delete-and-readd; SMTP gains env-var configuration and proper port-465 support; the From: mailbox stops mangling addresses without display names; and team event-type management permissions are tightened so management routes can't be reached via the read-only availability surface.
+
+### Added
+
+- **Edit CalDAV sources** (closes #72, PR #73) — `GET /dashboard/sources/{id}/edit` (form pre-filled, password field reads "Leave blank to keep existing") and `POST /dashboard/sources/{id}/edit` (apply), both scoped by `user_id`. CLI mirror: `calrs source update <id-prefix> [--name ...] [--url ...] [--username ...] [--password]`. `--password` is a flag that prompts via `rpassword` for scripted rotation. Empty password on either surface preserves the stored encrypted blob untouched. URL changes pass `validate_caldav_url` for SSRF parity between web and CLI
+- **SMTP via environment variables with TLS mode support** (PR #56) — `CALRS_SMTP_HOST`, `CALRS_SMTP_USERNAME`, `CALRS_SMTP_PASSWORD`, `CALRS_SMTP_FROM_EMAIL` required; `CALRS_SMTP_PORT` (default 587), `CALRS_SMTP_TLS_MODE` (`starttls`/`tls`), `CALRS_SMTP_FROM_NAME` optional. Env vars take priority over the DB; partial config errors loudly. New `SmtpTlsMode` enum branches `send_email` on `relay()` (implicit TLS) vs `starttls_relay()` to fix the port-465 hang. Applies to DB-configured SMTP too via new `tls_mode` column (migration 052, defaults to `'starttls'`); `calrs config smtp` prompt asks for the mode. Admin panel surfaces env-sourced status. `SmtpConfig`'s `Debug` impl now redacts the password so it can't leak through tracing or test output
+
+### Fixed
+
+- **From: mailbox handles missing display name and special characters** (PR #104) — `calrs config smtp-test` produced `Error: Invalid input` whenever `from_name` was `None`: the old fallback yielded a string like `you@example.com <you@example.com>` whose two `@`'s failed RFC 5322 parsing. All 17 send sites now build From through a new `SmtpConfig::mailbox_from()` helper using `Mailbox::new(Option<String>, Address)`, which also handles display names containing commas and other characters that need quoting. Unit test locks in both the `None` case and the `Some("Name, With Comma")` case
+- **Team event type management gated through a single capability check** (PR #55) — personal `/dashboard/event-types/{slug}/*` mutation routes now require `et.team_id IS NULL`; team-event mutation requires team admin; slug-collision resolution made deterministic via subquery + `ORDER BY (team_id IS NULL) DESC`. **Behaviour change worth noting:** `delete_invite` now strictly requires `can_manage_event_type`, so a non-admin team member who created an internal-event invite via the "any authenticated user" path can no longer delete that invite (let it expire or hit max-uses; owners, team admins, and global admins are unaffected). New `OptionalAuthUser` extractor with shared `resolve_session_user` lets public surfaces selectively widen access for logged-in viewers. Team members and global admins can now bypass the team-level invite token on public events of private teams; `team_profile_page` lists private/internal event-type titles + slugs for logged-in team members (booking stays invite-gated). 8 new regression tests cover the full manageability matrix
+
+### Internal
+
+- 671 tests total (up from 650 in 1.11.0), all green on pre-commit
+- Migration 052 (`smtp_config.tls_mode`)
 
 ## [1.11.0] - 2026-05-22
 
