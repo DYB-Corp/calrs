@@ -144,6 +144,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 | SMTP implicit TLS (port 465) | 1.12.0 | New `tls_mode` column (`starttls`/`tls`) supports port 465 without the prior STARTTLS hang. Applies to both env-var and DB-configured SMTP |
 | Team event type permission cleanup | 1.12.0 | Personal event-type mutation routes can't be reached via team URLs and vice versa; centralised through `can_manage_event_type` / `find_manageable_event_type_by_slug` with 8 new regression tests covering the manageability matrix |
 
+## [1.12.1] - 2026-05-26
+
+Patch release fixing wall-clock display in host-targeted emails. A Paris organizer reading a cancellation email for a Los Angeles guest's 07:00 booking would see "07:00" with no timezone label and naturally read it as Paris time (the correct Paris-local time is 16:00). No schema changes, no behaviour changes outside the email rendering surface.
+
+### Fixed
+
+- **Host emails display the host's wall-clock with a TZ label** (closes #119, PR #120) — `send_host_notification`, `send_host_booking_confirmed`, `send_host_reminder`, `send_host_cancellation`, `send_host_approval_request`, and `send_host_reschedule_request` now convert times into the host timezone (event-type tz via `get_host_tz`, falling back to `users.timezone`) and append a `(TZ)` suffix, e.g. `16:00 – 16:30 (Europe/Paris)`. Guest cancellation and decline emails gained the TZ label they were missing (confirmation and pending notices already had it). New `convert_time_between_tz` helper handles date rollover (e.g. LA 22:00 → Paris 07:00 next day) and DST gaps.
+- **Reminder loop and reschedule "Previous" times stopped double-converting** (PR #120) — `run_reminder_loop` and `guest_reschedule_booking`'s `old_*_time` extraction pulled `start_at` raw from the DB (event-type-tz wall-clock since #101) but labeled it with `guest_timezone`. With the new host-tz conversion path, this would have shifted the displayed time twice — a 16:00 Paris booking would render as "01:00 next day" in the host reminder. Both paths now run through `booking_strings_in_guest_tz` first, matching the contract used by the cancel/confirm/decline handlers. As a bonus this also fixes a pre-existing latent bug where the guest reminder was showing host-tz wall-clock under a guest-tz label.
+- **`host_reschedule_booking` switched to `get_host_tz`** (PR #120) — was using `user.timezone` directly, inconsistent with the other 15 call sites. SELECT now includes `et.id`; resolved host timezone derives from the event type.
+
+### Internal
+
+- 677 tests total (up from 671 in 1.12.0), all green on pre-commit
+- New helpers in `src/email.rs`: `convert_time_between_tz`, `host_time_display` (both unit-tested across DST, date-rollover, invalid-zone, and same-tz cases)
+- `BookingDetails`, `CancellationDetails`, `RescheduleDetails` gain a `host_timezone: String` field
+
 ## [1.12.0] - 2026-05-24
 
 A modernization pass on operator-facing surfaces: source connection details are now editable instead of delete-and-readd; SMTP gains env-var configuration and proper port-465 support; the From: mailbox stops mangling addresses without display names; and team event-type management permissions are tightened so management routes can't be reached via the read-only availability surface.
