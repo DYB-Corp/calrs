@@ -75,6 +75,9 @@ urlencoding = "2"
 # Markdown (bio rendering)
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
+# Browser launch (CLI OAuth2)
+open = "5"
+
 # Localization (Fluent)
 fluent-bundle = "0.15"
 unic-langid = "0.9"

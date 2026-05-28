@@ -14,6 +14,7 @@ mod db;
 mod email;
 mod i18n;
 mod models;
+mod oauth2_caldav;
 mod rrule;
 mod utils;
 mod web;
