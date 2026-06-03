@@ -55,11 +55,16 @@ impl CaptchaConfig {
 }
 
 fn extract_origin(url: &str) -> String {
-    let parts: Vec<&str> = url.splitn(4, '/').collect();
-    if parts.len() >= 3 && (parts[0] == "https:" || parts[0] == "http:") {
-        format!("{}//{}", parts[0], parts[2])
-    } else {
-        String::new()
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return String::new();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return String::new();
+    }
+    let host = parsed.host_str().unwrap_or("");
+    match parsed.port() {
+        Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
+        None => format!("{}://{}", parsed.scheme(), host),
     }
 }
 

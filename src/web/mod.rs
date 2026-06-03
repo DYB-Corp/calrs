@@ -13780,7 +13780,7 @@ async fn admin_update_captcha(
             Ok(s) => s,
             Err(e) => return internal_error_response("encrypt captcha secret", &e),
         };
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "UPDATE auth_config SET captcha_instance_url = ?, captcha_site_key = ?, captcha_secret = ?, captcha_widget_url = ?, updated_at = datetime('now') WHERE id = 'singleton'",
         )
         .bind(&instance_url)
@@ -13788,16 +13788,22 @@ async fn admin_update_captcha(
         .bind(&encrypted)
         .bind(&widget_url)
         .execute(&state.pool)
-        .await;
+        .await
+        {
+            tracing::error!(error = %e, "failed to save captcha config");
+        }
     } else {
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "UPDATE auth_config SET captcha_instance_url = ?, captcha_site_key = ?, captcha_widget_url = ?, updated_at = datetime('now') WHERE id = 'singleton'",
         )
         .bind(&instance_url)
         .bind(&site_key)
         .bind(&widget_url)
         .execute(&state.pool)
-        .await;
+        .await
+        {
+            tracing::error!(error = %e, "failed to save captcha config");
+        }
     }
 
     let new_config = captcha::load_captcha_config(&state.pool, &state.secret_key).await;
