@@ -92,7 +92,12 @@ pub struct AppState {
     pub theme_css: tokio::sync::RwLock<String>,
     pub company_link: tokio::sync::RwLock<Option<String>>,
     pub captcha_config: tokio::sync::RwLock<Option<captcha::CaptchaConfig>>,
+    /// CSP for booking form pages: relaxed with captcha origins when captcha
+    /// is enabled, identical to `csp_baseline` otherwise. Rebuilt on admin save.
     pub csp: tokio::sync::RwLock<String>,
+    /// Strict baseline CSP served on every non-booking page regardless of
+    /// captcha configuration.
+    pub csp_baseline: String,
 }
 
 // --- CSRF protection (double-submit cookie pattern) ---
@@ -859,17 +864,29 @@ fn build_csp(captcha: &Option<captcha::CaptchaConfig>) -> String {
     )
 }
 
+/// Booking form pages (`…/book`) are the only pages that embed the captcha
+/// widget, so they are the only ones that get the relaxed CSP when captcha is
+/// enabled. Every other page keeps the strict baseline policy.
+fn is_booking_form_path(path: &str) -> bool {
+    path.ends_with("/book")
+}
+
 async fn csp_middleware(
     State(state): State<Arc<AppState>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let booking_page = is_booking_form_path(request.uri().path());
     let mut response = next.run(request).await;
     if !response
         .headers()
         .contains_key(axum::http::header::CONTENT_SECURITY_POLICY)
     {
-        let csp = state.csp.read().await.clone();
+        let csp = if booking_page {
+            state.csp.read().await.clone()
+        } else {
+            state.csp_baseline.clone()
+        };
         if let Ok(val) = axum::http::HeaderValue::from_str(&csp) {
             response
                 .headers_mut()
@@ -902,6 +919,7 @@ pub async fn create_router(pool: SqlitePool, data_dir: PathBuf, secret_key: [u8;
         company_link: tokio::sync::RwLock::new(initial_company_link),
         captcha_config: tokio::sync::RwLock::new(initial_captcha),
         csp: tokio::sync::RwLock::new(initial_csp),
+        csp_baseline: build_csp(&None),
     });
 
     Router::new()
@@ -1153,6 +1171,10 @@ pub async fn create_router(pool: SqlitePool, data_dir: PathBuf, secret_key: [u8;
         // theme toggle, time-zone banner) and inline `style="..."` attributes.
         // Tightening this would require nonces wired through every render
         // site or a sweep across templates to externalize inline blocks.
+        //
+        // The CSP itself is set by `csp_middleware`: booking form pages
+        // (`…/book`) get the captcha-relaxed policy when captcha is enabled,
+        // everything else always gets the strict baseline.
         .layer(SetResponseHeaderLayer::if_not_present(
             axum::http::header::X_FRAME_OPTIONS,
             axum::http::HeaderValue::from_static("SAMEORIGIN"),
@@ -24220,6 +24242,23 @@ mod tests {
         ));
         let csp = build_csp(&cfg);
         assert!(csp.contains("https://cdn.jsdelivr.net"), "{}", csp);
+    }
+
+    #[test]
+    fn booking_form_paths_get_relaxed_csp() {
+        assert!(is_booking_form_path("/u/alice/intro/book"));
+        assert!(is_booking_form_path("/team/sales/demo/book"));
+        assert!(is_booking_form_path("/intro/book"));
+    }
+
+    #[test]
+    fn non_booking_paths_keep_baseline_csp() {
+        assert!(!is_booking_form_path("/"));
+        assert!(!is_booking_form_path("/dashboard"));
+        assert!(!is_booking_form_path("/dashboard/admin"));
+        assert!(!is_booking_form_path("/u/alice/intro"));
+        assert!(!is_booking_form_path("/booking/cancel/sometoken"));
+        assert!(!is_booking_form_path("/u/alice/bookkeeping"));
     }
 
     #[test]
