@@ -13764,9 +13764,7 @@ async fn admin_update_captcha(
         return resp;
     }
 
-    let instance_url = form
-        .captcha_instance_url
-        .filter(|s| !s.trim().is_empty());
+    let instance_url = form.captcha_instance_url.filter(|s| !s.trim().is_empty());
     let site_key = form.captcha_site_key.filter(|s| !s.trim().is_empty());
     let widget_url = form.captcha_widget_url.filter(|s| !s.trim().is_empty());
 

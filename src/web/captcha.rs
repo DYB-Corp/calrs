@@ -64,15 +64,19 @@ fn extract_origin(url: &str) -> String {
 }
 
 pub async fn load_captcha_config(pool: &SqlitePool, key: &[u8; 32]) -> Option<CaptchaConfig> {
-    let row: Option<(Option<String>, Option<String>, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT captcha_instance_url, captcha_site_key, captcha_secret, captcha_widget_url \
+    let row: Option<(
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT captcha_instance_url, captcha_site_key, captcha_secret, captcha_widget_url \
              FROM auth_config WHERE id = 'singleton'",
-        )
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
 
     let (instance_url, site_key, secret_enc, widget_url) = row?;
     let instance_url = instance_url.filter(|s| !s.trim().is_empty())?;

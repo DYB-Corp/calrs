@@ -231,10 +231,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             "053_oauth2_caldav",
             include_str!("../migrations/053_oauth2_caldav.sql"),
         ),
-        (
-            "054_captcha",
-            include_str!("../migrations/054_captcha.sql"),
-        ),
+        ("054_captcha", include_str!("../migrations/054_captcha.sql")),
     ];
 
     let mut applied_count = 0u32;
