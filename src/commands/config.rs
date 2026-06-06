@@ -70,6 +70,8 @@ pub enum ConfigCommands {
 
 // ── Dump-specific structs (no secret fields) ──
 
+// Note: oidc_client_secret, captcha_secret, google_oauth2_client_secret and
+// meeting_webhook_secret are deliberately excluded (secrets).
 #[derive(serde::Serialize, sqlx::FromRow)]
 #[serde(rename_all = "snake_case")]
 struct AuthConfigDump {
@@ -79,6 +81,24 @@ struct AuthConfigDump {
     oidc_issuer_url: Option<String>,
     oidc_client_id: Option<String>,
     oidc_auto_register: bool,
+    accent_color: String,
+    theme: String,
+    custom_accent: Option<String>,
+    custom_accent_hover: Option<String>,
+    custom_bg: Option<String>,
+    custom_surface: Option<String>,
+    custom_text: Option<String>,
+    company_link: Option<String>,
+    captcha_instance_url: Option<String>,
+    captcha_site_key: Option<String>,
+    captcha_widget_url: Option<String>,
+    google_oauth2_client_id: Option<String>,
+    jitsi_base_url: Option<String>,
+    jitsi_pattern: Option<String>,
+    jitsi_display_name: Option<String>,
+    meeting_webhook_url: Option<String>,
+    meeting_webhook_auth_mode: Option<String>,
+    meeting_webhook_display_name: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -92,6 +112,7 @@ struct SmtpConfigDump {
     username: String,
     from_email: String,
     from_name: Option<String>,
+    tls_mode: String,
     enabled: bool,
 }
 
@@ -115,6 +136,11 @@ struct UserDump {
     language: Option<String>,
 }
 
+// Note: password_enc, access_token_enc and refresh_token_enc are deliberately
+// excluded (secrets). last_synced / sync_token / last_full_sync /
+// token_expires_at are excluded too — they are operational sync state, not
+// configuration, and must not be transplanted by a future `config import`
+// onto a fresh deployment.
 #[derive(serde::Serialize, sqlx::FromRow)]
 #[serde(rename_all = "snake_case")]
 struct CaldavSourceDump {
@@ -123,8 +149,10 @@ struct CaldavSourceDump {
     name: String,
     url: String,
     username: String,
-    last_synced: Option<String>,
-    sync_token: Option<String>,
+    provider_type: String,
+    auth_type: String,
+    oauth2_provider: Option<String>,
+    write_calendar_href: Option<String>,
     enabled: bool,
     created_at: String,
 }
@@ -150,6 +178,14 @@ struct EventTypeDump {
     first_slot_only: bool,
     default_calendar_view: String,
     visibility: String,
+    slot_interval_min: Option<i32>,
+    timezone: Option<String>,
+    cancel_notice_min: Option<i32>,
+    reschedule_notice_min: Option<i32>,
+    meeting_pattern_override: Option<String>,
+    team_id: Option<String>,
+    group_id: Option<String>,
+    created_by_user_id: Option<String>,
     created_at: String,
     description: Option<String>,
 }
@@ -179,12 +215,126 @@ struct GroupDump {
     avatar_path: Option<String>,
 }
 
+#[derive(serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "snake_case")]
+struct AccountDump {
+    id: String,
+    user_id: Option<String>,
+    name: String,
+    email: String,
+    timezone: String,
+    created_at: String,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "snake_case")]
+struct AvailabilityRuleDump {
+    id: String,
+    event_type_id: String,
+    day_of_week: i32,
+    start_time: String,
+    end_time: String,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "snake_case")]
+struct AvailabilityOverrideDump {
+    id: String,
+    event_type_id: String,
+    date: String,
+    start_time: Option<String>,
+    end_time: Option<String>,
+    is_blocked: bool,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "snake_case")]
+struct UserAvailabilityRuleDump {
+    id: String,
+    user_id: String,
+    day_of_week: i32,
+    start_time: String,
+    end_time: String,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "snake_case")]
+struct EventTypeCalendarDump {
+    event_type_id: String,
+    calendar_id: String,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "snake_case")]
+struct EventTypeMemberWeightDump {
+    event_type_id: String,
+    user_id: String,
+    weight: i32,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "snake_case")]
+struct EventTypeWatcherDump {
+    event_type_id: String,
+    team_id: String,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "snake_case")]
+struct TeamMemberDump {
+    team_id: String,
+    user_id: String,
+    role: String,
+    source: String,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "snake_case")]
+struct TeamGroupDump {
+    team_id: String,
+    group_id: String,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "snake_case")]
+struct UserGroupDump {
+    user_id: String,
+    group_id: String,
+    weight: i32,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "snake_case")]
+struct BookingFrequencyLimitDump {
+    id: String,
+    event_type_id: String,
+    max_bookings: i32,
+    period: String,
+    per_member: bool,
+}
+
+/// Fetch all rows of a dump struct and serialize them as a JSON array.
+async fn dump_table<T>(pool: &SqlitePool, sql: &str) -> Result<serde_json::Value>
+where
+    T: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> + serde::Serialize + Send + Unpin,
+{
+    let rows: Vec<T> = sqlx::query_as::<_, T>(sql).fetch_all(pool).await?;
+    Ok(serde_json::to_value(&rows)?)
+}
+
 /// Build the full dump output as a JSON value, querying each config section.
 async fn build_dump_output(pool: &SqlitePool) -> Result<serde_json::Value> {
     // Auth config — SELECT only non-secret columns (omit oidc_client_secret)
     let auth_json = sqlx::query_as::<_, AuthConfigDump>(
         "SELECT registration_enabled, allowed_email_domains, oidc_enabled, \
-         oidc_issuer_url, oidc_client_id, oidc_auto_register, created_at, updated_at \
+         oidc_issuer_url, oidc_client_id, oidc_auto_register, \
+         accent_color, theme, custom_accent, custom_accent_hover, custom_bg, \
+         custom_surface, custom_text, company_link, \
+         captcha_instance_url, captcha_site_key, captcha_widget_url, \
+         google_oauth2_client_id, \
+         jitsi_base_url, jitsi_pattern, jitsi_display_name, \
+         meeting_webhook_url, meeting_webhook_auth_mode, meeting_webhook_display_name, \
+         created_at, updated_at \
          FROM auth_config WHERE id = 'singleton'",
     )
     .fetch_one(pool)
@@ -192,79 +342,174 @@ async fn build_dump_output(pool: &SqlitePool) -> Result<serde_json::Value> {
     let auth_json = serde_json::to_value(&auth_json)?;
 
     // SMTP config — skip password_enc (secret)
-    let smtp_json: serde_json::Value =
-        match sqlx::query_as::<_, SmtpConfigDump>(
-            "SELECT id, host, port, username, from_email, from_name, enabled \
-             FROM smtp_config LIMIT 1",
-        )
-        .fetch_optional(pool)
-        .await?
-        {
-            Some(row) => serde_json::to_value(&row)?,
-            None => serde_json::Value::Null,
-        };
+    let smtp_json: serde_json::Value = match sqlx::query_as::<_, SmtpConfigDump>(
+        "SELECT id, host, port, username, from_email, from_name, tls_mode, enabled \
+         FROM smtp_config LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?
+    {
+        Some(row) => serde_json::to_value(&row)?,
+        None => serde_json::Value::Null,
+    };
 
-    // Users — only enabled users; skip password_hash (secret)
-    let users: Vec<UserDump> = sqlx::query_as::<_, UserDump>(
+    // Accounts — scheduling profiles linked to users
+    let accounts_json = dump_table::<AccountDump>(
+        pool,
+        "SELECT id, user_id, name, email, timezone, created_at \
+         FROM accounts ORDER BY email",
+    )
+    .await?;
+
+    // Users — all users including disabled ones (the `enabled` flag is part of
+    // the configuration); skip password_hash (secret)
+    let users_json = dump_table::<UserDump>(
+        pool,
         "SELECT id, email, name, timezone, role, auth_provider, \
          oidc_subject, enabled, created_at, username, booking_email, \
          title, bio, allow_dynamic_group, language \
-         FROM users WHERE enabled = 1 ORDER BY email",
+         FROM users ORDER BY email",
     )
-    .fetch_all(pool)
     .await?;
-    let users_json = serde_json::to_value(&users)?;
 
-    // CalDAV sources — skip password_enc (secret)
-    let caldav_sources: Vec<CaldavSourceDump> = sqlx::query_as::<_, CaldavSourceDump>(
+    // Per-user default working hours
+    let user_availability_rules_json = dump_table::<UserAvailabilityRuleDump>(
+        pool,
+        "SELECT id, user_id, day_of_week, start_time, end_time \
+         FROM user_availability_rules ORDER BY user_id, day_of_week, start_time",
+    )
+    .await?;
+
+    // OIDC group membership + round-robin weight
+    let user_groups_json = dump_table::<UserGroupDump>(
+        pool,
+        "SELECT user_id, group_id, weight FROM user_groups ORDER BY group_id, user_id",
+    )
+    .await?;
+
+    // CalDAV/EWS sources — skip credentials (secrets) and sync state (operational)
+    let caldav_sources_json = dump_table::<CaldavSourceDump>(
+        pool,
         "SELECT id, account_id, name, url, username, \
-         last_synced, sync_token, enabled, created_at \
+         provider_type, auth_type, oauth2_provider, \
+         write_calendar_href, enabled, created_at \
          FROM caldav_sources ORDER BY name",
     )
-    .fetch_all(pool)
     .await?;
-    let caldav_sources_json = serde_json::to_value(&caldav_sources)?;
 
     // Event types — selected config fields, no operational data
-    let event_types: Vec<EventTypeDump> = sqlx::query_as::<_, EventTypeDump>(
+    let event_types_json = dump_table::<EventTypeDump>(
+        pool,
         "SELECT id, account_id, slug, title, duration_min, location_type, \
          location_value, buffer_before, buffer_after, min_notice_min, enabled, \
          requires_confirmation, reminder_minutes, max_additional_guests, \
          scheduling_mode, first_slot_only, default_calendar_view, visibility, \
+         slot_interval_min, timezone, cancel_notice_min, reschedule_notice_min, \
+         meeting_pattern_override, team_id, group_id, created_by_user_id, \
          created_at, description \
          FROM event_types ORDER BY title",
     )
-    .fetch_all(pool)
     .await?;
-    let event_types_json = serde_json::to_value(&event_types)?;
 
-    // Teams
-    let teams: Vec<TeamDump> = sqlx::query_as::<_, TeamDump>(
+    // Weekly availability windows per event type
+    let availability_rules_json = dump_table::<AvailabilityRuleDump>(
+        pool,
+        "SELECT id, event_type_id, day_of_week, start_time, end_time \
+         FROM availability_rules ORDER BY event_type_id, day_of_week, start_time",
+    )
+    .await?;
+
+    // Date-specific exceptions per event type
+    let availability_overrides_json = dump_table::<AvailabilityOverrideDump>(
+        pool,
+        "SELECT id, event_type_id, date, start_time, end_time, is_blocked \
+         FROM availability_overrides ORDER BY event_type_id, date",
+    )
+    .await?;
+
+    // Per-event-type calendar selection
+    let event_type_calendars_json = dump_table::<EventTypeCalendarDump>(
+        pool,
+        "SELECT event_type_id, calendar_id \
+         FROM event_type_calendars ORDER BY event_type_id, calendar_id",
+    )
+    .await?;
+
+    // Per-event-type round-robin member weights
+    let event_type_member_weights_json = dump_table::<EventTypeMemberWeightDump>(
+        pool,
+        "SELECT event_type_id, user_id, weight \
+         FROM event_type_member_weights ORDER BY event_type_id, user_id",
+    )
+    .await?;
+
+    // Teams watching an event type for booking claims
+    let event_type_watchers_json = dump_table::<EventTypeWatcherDump>(
+        pool,
+        "SELECT event_type_id, team_id \
+         FROM event_type_watchers ORDER BY event_type_id, team_id",
+    )
+    .await?;
+
+    // Per-event-type booking caps
+    let booking_frequency_limits_json = dump_table::<BookingFrequencyLimitDump>(
+        pool,
+        "SELECT id, event_type_id, max_bookings, period, per_member \
+         FROM booking_frequency_limits ORDER BY event_type_id",
+    )
+    .await?;
+
+    // Teams — skip invite_token (secret: grants access to private teams)
+    let teams_json = dump_table::<TeamDump>(
+        pool,
         "SELECT id, name, slug, description, avatar_path, \
          visibility, created_at \
          FROM teams ORDER BY name",
     )
-    .fetch_all(pool)
     .await?;
-    let teams_json = serde_json::to_value(&teams)?;
+
+    // Team composition (direct members and OIDC-synced members)
+    let team_members_json = dump_table::<TeamMemberDump>(
+        pool,
+        "SELECT team_id, user_id, role, source FROM team_members ORDER BY team_id, user_id",
+    )
+    .await?;
+
+    // OIDC group linkage for automatic member sync
+    let team_groups_json = dump_table::<TeamGroupDump>(
+        pool,
+        "SELECT team_id, group_id FROM team_groups ORDER BY team_id, group_id",
+    )
+    .await?;
 
     // Groups (legacy — kept for OIDC identity sync)
-    let groups: Vec<GroupDump> = sqlx::query_as::<_, GroupDump>(
+    let groups_json = dump_table::<GroupDump>(
+        pool,
         "SELECT id, name, source, oidc_id, created_at, \
          slug, description, avatar_path \
          FROM groups ORDER BY name",
     )
-    .fetch_all(pool)
     .await?;
-    let groups_json = serde_json::to_value(&groups)?;
 
     Ok(serde_json::json!({
+        "schema_version": 1,
         "auth": auth_json,
         "smtp": smtp_json,
+        "accounts": accounts_json,
         "users": users_json,
+        "user_availability_rules": user_availability_rules_json,
+        "user_groups": user_groups_json,
         "caldav_sources": caldav_sources_json,
         "event_types": event_types_json,
+        "availability_rules": availability_rules_json,
+        "availability_overrides": availability_overrides_json,
+        "event_type_calendars": event_type_calendars_json,
+        "event_type_member_weights": event_type_member_weights_json,
+        "event_type_watchers": event_type_watchers_json,
+        "booking_frequency_limits": booking_frequency_limits_json,
         "teams": teams_json,
+        "team_members": team_members_json,
+        "team_groups": team_groups_json,
         "groups": groups_json,
     }))
 }
@@ -819,13 +1064,47 @@ mod tests {
     async fn config_dump_default() {
         let pool = setup_db().await;
         let output = build_dump_output(&pool).await.unwrap();
+        assert_eq!(output["schema_version"], 1);
         assert!(output["auth"]["registration_enabled"].as_bool().unwrap());
+        // Secrets must never appear in the auth section
+        let auth = output["auth"].as_object().unwrap();
+        for secret in [
+            "oidc_client_secret",
+            "captcha_secret",
+            "google_oauth2_client_secret",
+            "meeting_webhook_secret",
+        ] {
+            assert!(
+                !auth.contains_key(secret),
+                "auth section must not contain '{}'",
+                secret
+            );
+        }
         assert!(output["smtp"].is_null());
-        assert!(output["users"].as_array().unwrap().is_empty());
-        assert!(output["caldav_sources"].as_array().unwrap().is_empty());
-        assert!(output["event_types"].as_array().unwrap().is_empty());
-        assert!(output["teams"].as_array().unwrap().is_empty());
-        assert!(output["groups"].as_array().unwrap().is_empty());
+        for section in [
+            "accounts",
+            "users",
+            "user_availability_rules",
+            "user_groups",
+            "caldav_sources",
+            "event_types",
+            "availability_rules",
+            "availability_overrides",
+            "event_type_calendars",
+            "event_type_member_weights",
+            "event_type_watchers",
+            "booking_frequency_limits",
+            "teams",
+            "team_members",
+            "team_groups",
+            "groups",
+        ] {
+            assert!(
+                output[section].as_array().unwrap().is_empty(),
+                "section '{}' should be an empty array",
+                section
+            );
+        }
     }
 
     #[tokio::test]
@@ -879,13 +1158,11 @@ mod tests {
 
         // Insert an account (required by event_types FK)
         let account_id = Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO accounts (id, name, email) VALUES (?, 'Alice', 'alice@test.com')",
-        )
-        .bind(&account_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email) VALUES (?, 'Alice', 'alice@test.com')")
+            .bind(&account_id)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // Insert an event type
         let et_id = Uuid::new_v4().to_string();
@@ -911,13 +1188,11 @@ mod tests {
 
         // Insert a group
         let group_id = Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO groups (id, name, source) VALUES (?, 'Engineering', 'local')",
-        )
-        .bind(&group_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO groups (id, name, source) VALUES (?, 'Engineering', 'local')")
+            .bind(&group_id)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let output = build_dump_output(&pool).await.unwrap();
         assert_eq!(output["users"].as_array().unwrap().len(), 1);
@@ -931,7 +1206,7 @@ mod tests {
         assert_eq!(output["teams"].as_array().unwrap().len(), 1);
         assert_eq!(output["groups"].as_array().unwrap().len(), 1);
 
-        // Test with a disabled user — should not appear
+        // A disabled user is still configuration — it should appear, flagged disabled
         let disabled_id = Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO users (id, email, name, password_hash, role, auth_provider, enabled) \
@@ -943,11 +1218,13 @@ mod tests {
         .unwrap();
 
         let output = build_dump_output(&pool).await.unwrap();
-        assert_eq!(
-            output["users"].as_array().unwrap().len(),
-            1,
-            "disabled user should not appear"
-        );
+        let users = output["users"].as_array().unwrap();
+        assert_eq!(users.len(), 2, "disabled user should appear in the dump");
+        let bob = users
+            .iter()
+            .find(|u| u["email"] == "bob@test.com")
+            .expect("bob should be in the dump");
+        assert!(!bob["enabled"].as_bool().unwrap());
     }
 
     #[tokio::test]
@@ -986,9 +1263,103 @@ mod tests {
         let output = build_dump_output(&pool).await.unwrap();
         let sources = output["caldav_sources"].as_array().unwrap();
         assert_eq!(sources.len(), 1);
-        assert!(!sources[0]
-            .as_object()
-            .unwrap()
-            .contains_key("password_enc"));
+        let source = sources[0].as_object().unwrap();
+        assert!(!source.contains_key("password_enc"));
+        // Operational sync state is excluded too
+        assert!(!source.contains_key("last_synced"));
+        assert!(!source.contains_key("sync_token"));
+    }
+
+    #[tokio::test]
+    async fn config_dump_relational_sections() {
+        let pool = setup_db().await;
+
+        let user_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO users (id, email, name, role, auth_provider) \
+             VALUES (?, 'host@test.com', 'Host', 'user', 'local')",
+        )
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let account_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO accounts (id, name, email, user_id) VALUES (?, 'Host', 'host@test.com', ?)",
+        )
+        .bind(&account_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let et_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO event_types (id, account_id, slug, title, duration_min) \
+             VALUES (?, ?, 'demo', 'Demo', 45)",
+        )
+        .bind(&et_id)
+        .bind(&account_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Weekly rule, date override, per-user hours, frequency limit
+        sqlx::query(
+            "INSERT INTO availability_rules (id, event_type_id, day_of_week, start_time, end_time) \
+             VALUES (?, ?, 1, '09:00', '17:00')",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&et_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO availability_overrides (id, event_type_id, date, is_blocked) \
+             VALUES (?, ?, '2026-12-25', 1)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&et_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_availability_rules (id, user_id, day_of_week, start_time, end_time) \
+             VALUES (?, ?, 2, '10:00', '16:00')",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO booking_frequency_limits (id, event_type_id, max_bookings, period) \
+             VALUES (?, ?, 3, 'day')",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&et_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let output = build_dump_output(&pool).await.unwrap();
+        assert_eq!(output["accounts"].as_array().unwrap().len(), 1);
+        assert_eq!(output["availability_rules"].as_array().unwrap().len(), 1);
+        assert_eq!(output["availability_rules"][0]["day_of_week"], 1);
+        assert_eq!(
+            output["availability_overrides"].as_array().unwrap().len(),
+            1
+        );
+        assert!(output["availability_overrides"][0]["is_blocked"]
+            .as_bool()
+            .unwrap());
+        assert_eq!(
+            output["user_availability_rules"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            output["booking_frequency_limits"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(output["booking_frequency_limits"][0]["period"], "day");
     }
 }
