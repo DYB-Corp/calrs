@@ -294,7 +294,7 @@ mod tests {
     //   EWS_URL=https://mail.example.com/EWS/Exchange.asmx \
     //   EWS_USER=alice@example.com \
     //   EWS_PASS=...                                       \
-    //   cargo test -p calrs --lib ews::tests::ews_smoke -- --ignored --nocapture
+    //   cargo test ews_smoke -- --ignored --nocapture
     // Use EWS_EMAIL instead of EWS_URL to exercise autodiscover.
     #[tokio::test]
     #[ignore = "needs a real Exchange server; set EWS_URL/EWS_USER/EWS_PASS"]
