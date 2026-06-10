@@ -248,6 +248,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             "058_caldav_sources_managed",
             include_str!("../migrations/058_caldav_sources_managed.sql"),
         ),
+        (
+            "059_ews_impersonation_domain",
+            include_str!("../migrations/059_ews_impersonation_domain.sql"),
+        ),
     ];
 
     let mut applied_count = 0u32;
@@ -855,7 +859,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count.0, 58, "All 58 migrations should be tracked");
+        assert_eq!(count.0, 59, "All 59 migrations should be tracked");
     }
 
     #[tokio::test]
@@ -869,7 +873,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count.0, 58, "Still 58 migrations after second run");
+        assert_eq!(count.0, 59, "Still 59 migrations after second run");
     }
 
     #[tokio::test]
