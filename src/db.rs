@@ -237,12 +237,24 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             include_str!("../migrations/055_provider_type.sql"),
         ),
         (
+            "056_lead_capture",
+            include_str!("../migrations/056_lead_capture.sql"),
+        ),
+        (
             "056_meeting_links",
             include_str!("../migrations/056_meeting_links.sql"),
         ),
         (
+            "057_lead_followups",
+            include_str!("../migrations/057_lead_followups.sql"),
+        ),
+        (
             "057_runtime_settings",
             include_str!("../migrations/057_runtime_settings.sql"),
+        ),
+        (
+            "058_lead_capture_legal_and_phone",
+            include_str!("../migrations/058_lead_capture_legal_and_phone.sql"),
         ),
     ];
 
@@ -851,7 +863,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count.0, 57, "All 57 migrations should be tracked");
+        assert_eq!(count.0, 60, "All 60 migrations should be tracked");
     }
 
     #[tokio::test]
@@ -865,7 +877,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count.0, 57, "Still 57 migrations after second run");
+        assert_eq!(count.0, 60, "Still 60 migrations after second run");
     }
 
     #[tokio::test]
