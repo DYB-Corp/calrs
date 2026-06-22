@@ -245,6 +245,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             include_str!("../migrations/056_meeting_links.sql"),
         ),
         (
+            "057_ews_global_config",
+            include_str!("../migrations/057_ews_global_config.sql"),
+        ),
+        (
             "057_lead_followups",
             include_str!("../migrations/057_lead_followups.sql"),
         ),
@@ -253,8 +257,24 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             include_str!("../migrations/057_runtime_settings.sql"),
         ),
         (
+            "058_caldav_sources_managed",
+            include_str!("../migrations/058_caldav_sources_managed.sql"),
+        ),
+        (
             "058_lead_capture_legal_and_phone",
             include_str!("../migrations/058_lead_capture_legal_and_phone.sql"),
+        ),
+        (
+            "059_ews_impersonation_domain",
+            include_str!("../migrations/059_ews_impersonation_domain.sql"),
+        ),
+        (
+            "060_source_last_sync_error",
+            include_str!("../migrations/060_source_last_sync_error.sql"),
+        ),
+        (
+            "061_managed_ews_unique",
+            include_str!("../migrations/061_managed_ews_unique.sql"),
         ),
     ];
 
@@ -863,7 +883,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count.0, 60, "All 60 migrations should be tracked");
+        assert_eq!(count.0, 65, "All 65 migrations should be tracked");
     }
 
     #[tokio::test]
@@ -877,7 +897,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count.0, 60, "Still 60 migrations after second run");
+        assert_eq!(count.0, 65, "Still 65 migrations after second run");
     }
 
     #[tokio::test]

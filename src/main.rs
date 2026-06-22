@@ -136,7 +136,9 @@ async fn main() -> Result<()> {
         Commands::Booking { command } => {
             commands::booking::run(&pool, &secret_key, command).await?
         }
-        Commands::User { command } => commands::user::run(&pool, &data_dir, command).await?,
+        Commands::User { command } => {
+            commands::user::run(&pool, &data_dir, &secret_key, command).await?
+        }
         Commands::Config { command } => commands::config::run(&pool, &secret_key, command).await?,
         Commands::Serve { port, host } => {
             // Load DB-backed runtime settings (base URL, private-host allowlist)
