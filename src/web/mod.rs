@@ -1158,7 +1158,7 @@ fn build_csp(captcha: &Option<captcha::CaptchaConfig>) -> String {
         None => ("", "", String::new(), String::new()),
     };
     format!(
-        "default-src 'self'; img-src 'self' data:; \
+        "default-src 'self'; img-src 'self' data: https://www.gravatar.com; \
          style-src 'self' 'unsafe-inline'; \
          script-src 'self' 'unsafe-inline'{}{}; \
          {}connect-src 'self'{}; \
@@ -1387,6 +1387,7 @@ pub async fn create_router(pool: SqlitePool, data_dir: PathBuf, secret_key: [u8;
         .route("/dashboard/admin/general", post(admin_update_general))
         .route("/dashboard/admin/accent", post(admin_update_accent))
         .route("/dashboard/admin/oidc", post(admin_update_oidc))
+        .route("/dashboard/admin/gravatar", post(admin_update_gravatar))
         .route(
             "/dashboard/admin/google-oauth2",
             post(admin_update_google_oauth2),
@@ -1612,6 +1613,17 @@ fn compute_initials(name: &str) -> String {
     }
 }
 
+/// Whether a user's avatar should render as an `<img src="/avatar/{id}">`
+/// (rather than initials). True when the user uploaded an avatar, or when
+/// Gravatar is enabled org-wide — in the latter case `serve_avatar` redirects
+/// to Gravatar (possibly the neutral default). The rare "opted into internal
+/// with no upload while Gravatar is on" case yields a 404 that the templates'
+/// `onerror` handler turns back into initials.
+fn show_avatar(avatar_path: Option<&str>, avatar_source: Option<&str>) -> bool {
+    avatar_path.is_some()
+        || (crate::settings::gravatar_enabled() && avatar_source != Some("internal"))
+}
+
 /// Build OIDC groups context with member details for stacked avatars.
 async fn build_groups_ctx(
     pool: &sqlx::SqlitePool,
@@ -1620,8 +1632,8 @@ async fn build_groups_ctx(
 ) -> Vec<minijinja::Value> {
     let mut out = Vec::new();
     for (id, name, member_count) in oidc_groups {
-        let group_members: Vec<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT u.id, u.name, u.avatar_path FROM users u \
+        let group_members: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT u.id, u.name, u.avatar_path, u.avatar_source FROM users u \
              JOIN user_groups ug ON ug.user_id = u.id \
              WHERE ug.group_id = ? AND u.enabled = 1 ORDER BY u.name LIMIT 8",
         )
@@ -1631,11 +1643,11 @@ async fn build_groups_ctx(
         .unwrap_or_default();
         let members_ctx: Vec<minijinja::Value> = group_members
             .iter()
-            .map(|(uid, uname, ap)| {
+            .map(|(uid, uname, ap, asrc)| {
                 context! {
                     id => uid,
                     name => uname,
-                    has_avatar => ap.is_some(),
+                    has_avatar => show_avatar(ap.as_deref(), asrc.as_deref()),
                     initials => compute_initials(uname),
                 }
             })
@@ -1666,7 +1678,7 @@ pub(crate) fn sidebar_context(auth_user: &crate::auth::AuthUser, active: &str) -
         user_id => user.id,
         user_role => effective_role,
         user_timezone => user.timezone,
-        has_avatar => user.avatar_path.is_some(),
+        has_avatar => show_avatar(user.avatar_path.as_deref(), user.avatar_source.as_deref()),
         user_initials => compute_initials(&user.name),
         active => active,
         version => env!("CARGO_PKG_VERSION"),
@@ -2181,7 +2193,7 @@ async fn dashboard_teams(
                     slug => slug,
                     description => description,
                     visibility => visibility,
-                    has_avatar => avatar_path.is_some(),
+                    has_avatar => show_avatar(avatar_path.as_deref(), Some("internal")),
                     initials => initials,
                     member_count => member_count,
                     is_team_admin => user_is_team_admin,
@@ -2321,11 +2333,21 @@ fn parse_dynamic_group_usernames(combined: &str) -> Result<Vec<String>, String> 
 async fn validate_dynamic_group_users(
     pool: &SqlitePool,
     usernames: &[String],
-) -> Result<Vec<(String, String, String, String, Option<String>)>, String> {
+) -> Result<
+    Vec<(
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    )>,
+    String,
+> {
     let mut users = Vec::with_capacity(usernames.len());
     for uname in usernames {
-        let row: Option<(String, String, String, String, Option<String>, bool)> = sqlx::query_as(
-            "SELECT id, username, name, COALESCE(booking_email, email), avatar_path, allow_dynamic_group FROM users WHERE username = ? AND enabled = 1",
+        let row: Option<(String, String, String, String, Option<String>, Option<String>, bool)> = sqlx::query_as(
+            "SELECT id, username, name, COALESCE(booking_email, email), avatar_path, avatar_source, allow_dynamic_group FROM users WHERE username = ? AND enabled = 1",
         )
         .bind(uname)
         .fetch_optional(pool)
@@ -2333,14 +2355,14 @@ async fn validate_dynamic_group_users(
         .unwrap_or(None);
         match row {
             None => return Err(format!("User '{}' not found.", uname)),
-            Some((_, _, _, _, _, false)) => {
+            Some((_, _, _, _, _, _, false)) => {
                 return Err(format!(
                     "User '{}' has not enabled dynamic group links.",
                     uname
                 ))
             }
-            Some((id, username, name, email, avatar_path, _)) => {
-                users.push((id, username, name, email, avatar_path));
+            Some((id, username, name, email, avatar_path, avatar_source, _)) => {
+                users.push((id, username, name, email, avatar_path, avatar_source));
             }
         }
     }
@@ -2354,7 +2376,7 @@ fn admin_sidebar_context(user: &crate::models::User, active: &str) -> minijinja:
         user_id => user.id,
         user_role => "admin",
         user_timezone => user.timezone,
-        has_avatar => user.avatar_path.is_some(),
+        has_avatar => show_avatar(user.avatar_path.as_deref(), user.avatar_source.as_deref()),
         user_initials => compute_initials(&user.name),
         active => active,
         version => env!("CARGO_PKG_VERSION"),
@@ -2368,8 +2390,8 @@ async fn show_team_form(
     let user = &admin.0;
 
     // Fetch all enabled users
-    let all_users: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, name, email, avatar_path FROM users WHERE enabled = 1 ORDER BY name",
+    let all_users: Vec<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, name, email, avatar_path, avatar_source FROM users WHERE enabled = 1 ORDER BY name",
     )
     .fetch_all(&state.pool)
     .await
@@ -2377,13 +2399,13 @@ async fn show_team_form(
 
     let users_ctx: Vec<minijinja::Value> = all_users
         .iter()
-        .map(|(id, name, email, avatar_path)| {
+        .map(|(id, name, email, avatar_path, avatar_source)| {
             context! {
                 id => id,
                 name => name,
                 email => email,
                 is_self => id == &user.id,
-                has_avatar => avatar_path.is_some(),
+                has_avatar => show_avatar(avatar_path.as_deref(), avatar_source.as_deref()),
                 initials => compute_initials(name),
             }
         })
@@ -2595,8 +2617,8 @@ async fn render_team_form_error(
     error: &str,
     form: &TeamForm,
 ) -> Html<String> {
-    let all_users: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, name, email, avatar_path FROM users WHERE enabled = 1 ORDER BY name",
+    let all_users: Vec<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, name, email, avatar_path, avatar_source FROM users WHERE enabled = 1 ORDER BY name",
     )
     .fetch_all(&state.pool)
     .await
@@ -2604,13 +2626,13 @@ async fn render_team_form_error(
 
     let users_ctx: Vec<minijinja::Value> = all_users
         .iter()
-        .map(|(id, name, email, avatar_path)| {
+        .map(|(id, name, email, avatar_path, avatar_source)| {
             context! {
                 id => id,
                 name => name,
                 email => email,
                 is_self => id == &user.id,
-                has_avatar => avatar_path.is_some(),
+                has_avatar => show_avatar(avatar_path.as_deref(), avatar_source.as_deref()),
                 initials => compute_initials(name),
             }
         })
@@ -2854,6 +2876,10 @@ struct SettingsForm {
     timezone: Option<String>,
     language: Option<String>,
     allow_dynamic_group: Option<String>,
+    /// Avatar source choice: "gravatar" or "internal". Absent/empty leaves it
+    /// unset (follow the org default). Only meaningful when Gravatar is enabled
+    /// org-wide.
+    avatar_source: Option<String>,
     #[serde(default)]
     avail_schedule: String,
 }
@@ -3129,7 +3155,10 @@ fn settings_render(
             lang_options => lang_options,
             user_email => user.email,
             user_id => user.id,
-            has_avatar => user.avatar_path.is_some(),
+            has_avatar => show_avatar(user.avatar_path.as_deref(), user.avatar_source.as_deref()),
+            has_uploaded_avatar => user.avatar_path.is_some(),
+            gravatar_enabled => crate::settings::gravatar_enabled(),
+            avatar_source => user.avatar_source.as_deref().unwrap_or(""),
             username => user.username.as_deref().unwrap_or(""),
             allow_dynamic_group => user.allow_dynamic_group,
             form_avail_schedule => avail_schedule,
@@ -3290,8 +3319,16 @@ async fn settings_save(
 
     let allow_dynamic_group = form.allow_dynamic_group.as_deref() == Some("on");
 
+    // Avatar source preference. Only honour explicit "gravatar"/"internal";
+    // anything else (including absent) stores NULL = follow the org default.
+    let avatar_source = match form.avatar_source.as_deref() {
+        Some("gravatar") => Some("gravatar"),
+        Some("internal") => Some("internal"),
+        _ => None,
+    };
+
     let result = sqlx::query(
-        "UPDATE users SET name = ?, title = ?, bio = ?, booking_email = ?, timezone = ?, language = ?, allow_dynamic_group = ?, updated_at = datetime('now') WHERE id = ?",
+        "UPDATE users SET name = ?, title = ?, bio = ?, booking_email = ?, timezone = ?, language = ?, allow_dynamic_group = ?, avatar_source = ?, updated_at = datetime('now') WHERE id = ?",
     )
     .bind(&name)
     .bind(&title)
@@ -3300,6 +3337,7 @@ async fn settings_save(
     .bind(&timezone)
     .bind(&language)
     .bind(allow_dynamic_group)
+    .bind(avatar_source)
     .bind(&user.id)
     .execute(&state.pool)
     .await;
@@ -3477,19 +3515,47 @@ async fn delete_avatar(
     Redirect::to("/dashboard/settings").into_response()
 }
 
+/// Build the Gravatar image URL for an email address. Gravatar keys avatars on
+/// the (lowercased, trimmed) email hashed with MD5 — that scheme is fixed by
+/// Gravatar, hence the dedicated `md5` dependency. `d=mp` returns a neutral
+/// "mystery person" silhouette when the email has no Gravatar account, so the
+/// `<img>` never breaks.
+fn gravatar_url(email: &str) -> String {
+    let normalized = email.trim().to_ascii_lowercase();
+    let hash = format!("{:x}", md5::compute(normalized.as_bytes()));
+    format!("https://www.gravatar.com/avatar/{hash}?d=mp&s=200")
+}
+
 async fn serve_avatar(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
-    let avatar_path: Option<(String,)> =
-        sqlx::query_as("SELECT avatar_path FROM users WHERE id = ? AND avatar_path IS NOT NULL")
+    // Pull the upload, the per-user source preference, and the email together:
+    // we need all three to decide between Gravatar and the internal file.
+    let row: Option<(Option<String>, Option<String>, String)> =
+        sqlx::query_as("SELECT avatar_path, avatar_source, email FROM users WHERE id = ?")
             .bind(&user_id)
             .fetch_optional(&state.pool)
             .await
             .unwrap_or(None);
 
+    let (avatar_path, avatar_source, email) = match row {
+        Some(r) => r,
+        None => return (axum::http::StatusCode::NOT_FOUND, "").into_response(),
+    };
+
+    // Gravatar is the effective source when enabled org-wide AND the user has
+    // not explicitly opted into the internal system.
+    let use_gravatar =
+        crate::settings::gravatar_enabled() && avatar_source.as_deref() != Some("internal");
+    if use_gravatar {
+        return Redirect::to(&gravatar_url(&email)).into_response();
+    }
+
+    // Internal source: serve the uploaded file, else 404 (the template falls
+    // back to initials).
     let filename = match avatar_path {
-        Some((f,)) => f,
+        Some(f) => f,
         None => return (axum::http::StatusCode::NOT_FOUND, "").into_response(),
     };
 
@@ -3655,8 +3721,15 @@ async fn team_settings_page(
         None => return Html("Team not found.".to_string()),
     };
 
-    let members: Vec<(String, String, Option<String>, String, String)> = sqlx::query_as(
-        "SELECT u.id, u.name, u.avatar_path, tm.role, tm.source FROM users u \
+    let members: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+    )> = sqlx::query_as(
+        "SELECT u.id, u.name, u.avatar_path, u.avatar_source, tm.role, tm.source FROM users u \
          JOIN team_members tm ON tm.user_id = u.id \
          WHERE tm.team_id = ? AND u.enabled = 1 \
          ORDER BY u.name",
@@ -3668,11 +3741,11 @@ async fn team_settings_page(
 
     let members_ctx: Vec<minijinja::Value> = members
         .iter()
-        .map(|(id, name, ap, role, source)| {
+        .map(|(id, name, ap, asrc, role, source)| {
             context! {
                 id => id,
                 name => name,
-                has_avatar => ap.is_some(),
+                has_avatar => show_avatar(ap.as_deref(), asrc.as_deref()),
                 initials => compute_initials(name),
                 role => role,
                 source => source,
@@ -3681,24 +3754,24 @@ async fn team_settings_page(
         .collect();
 
     // All enabled users for the member picker
-    let all_users: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, name, email, avatar_path FROM users WHERE enabled = 1 ORDER BY name",
+    let all_users: Vec<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, name, email, avatar_path, avatar_source FROM users WHERE enabled = 1 ORDER BY name",
     )
     .fetch_all(&state.pool)
     .await
     .unwrap_or_default();
 
     let member_ids: std::collections::HashSet<&str> =
-        members.iter().map(|(id, _, _, _, _)| id.as_str()).collect();
+        members.iter().map(|(id, ..)| id.as_str()).collect();
 
     let all_users_ctx: Vec<minijinja::Value> = all_users
         .iter()
-        .map(|(id, name, email, avatar_path)| {
+        .map(|(id, name, email, avatar_path, avatar_source)| {
             context! {
                 id => id,
                 name => name,
                 email => email,
-                has_avatar => avatar_path.is_some(),
+                has_avatar => show_avatar(avatar_path.as_deref(), avatar_source.as_deref()),
                 initials => compute_initials(name),
                 is_member => member_ids.contains(id.as_str()),
             }
@@ -4546,22 +4619,23 @@ async fn new_event_type_form(
     // Fetch members for each team (for client-side priority card)
     let mut groups_ctx: Vec<minijinja::Value> = Vec::new();
     for (id, name) in &groups {
-        let team_members: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
-            "SELECT u.id, u.name, u.avatar_path, u.timezone FROM users u \
+        let team_members: Vec<(String, String, Option<String>, Option<String>, String)> =
+            sqlx::query_as(
+                "SELECT u.id, u.name, u.avatar_path, u.avatar_source, u.timezone FROM users u \
              JOIN team_members tm ON tm.user_id = u.id \
              WHERE tm.team_id = ? AND u.enabled = 1 ORDER BY u.name",
-        )
-        .bind(id)
-        .fetch_all(&state.pool)
-        .await
-        .unwrap_or_default();
+            )
+            .bind(id)
+            .fetch_all(&state.pool)
+            .await
+            .unwrap_or_default();
         let members_ctx: Vec<minijinja::Value> = team_members
             .iter()
-            .map(|(uid, uname, ap, tz)| {
+            .map(|(uid, uname, ap, asrc, tz)| {
                 context! {
                     user_id => uid,
                     name => uname,
-                    has_avatar => ap.is_some(),
+                    has_avatar => show_avatar(ap.as_deref(), asrc.as_deref()),
                     initials => compute_initials(uname),
                     timezone => tz,
                 }
@@ -5137,16 +5211,17 @@ async fn edit_event_type_form(
         // a glance when setting up a team event (e.g. a US member whose TZ
         // is still the server default — which silently makes their personal
         // working hours land in the wrong local time).
-        let members: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
-            "SELECT u.id, u.name, u.avatar_path, u.timezone \
+        let members: Vec<(String, String, Option<String>, Option<String>, String)> =
+            sqlx::query_as(
+                "SELECT u.id, u.name, u.avatar_path, u.avatar_source, u.timezone \
              FROM users u JOIN team_members tm ON tm.user_id = u.id \
              WHERE tm.team_id = ? AND u.enabled = 1 \
              ORDER BY u.name",
-        )
-        .bind(tid)
-        .fetch_all(&state.pool)
-        .await
-        .unwrap_or_default();
+            )
+            .bind(tid)
+            .fetch_all(&state.pool)
+            .await
+            .unwrap_or_default();
 
         let et_weights: Vec<(String, i64)> = sqlx::query_as(
             "SELECT user_id, weight FROM event_type_member_weights WHERE event_type_id = ?",
@@ -5159,12 +5234,12 @@ async fn edit_event_type_form(
 
         members
             .iter()
-            .map(|(uid, name, avatar_path, timezone)| {
+            .map(|(uid, name, avatar_path, avatar_source, timezone)| {
                 let w = wmap.get(uid).copied().unwrap_or(1);
                 context! {
                     user_id => uid,
                     name => name,
-                    has_avatar => avatar_path.is_some(),
+                    has_avatar => show_avatar(avatar_path.as_deref(), avatar_source.as_deref()),
                     initials => compute_initials(name),
                     weight => w,
                     timezone => timezone,
@@ -5204,8 +5279,8 @@ async fn edit_event_type_form(
     let (impersonating, impersonating_name, _) = impersonation_ctx(&auth_user);
 
     // Eligible users for dynamic group link picker (excluding self)
-    let dg_eligible: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, username, name, avatar_path FROM users WHERE enabled = 1 AND allow_dynamic_group = 1 AND id != ? AND username IS NOT NULL ORDER BY name",
+    let dg_eligible: Vec<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, username, name, avatar_path, avatar_source FROM users WHERE enabled = 1 AND allow_dynamic_group = 1 AND id != ? AND username IS NOT NULL ORDER BY name",
     )
     .bind(&user.id)
     .fetch_all(&state.pool)
@@ -5213,12 +5288,12 @@ async fn edit_event_type_form(
     .unwrap_or_default();
     let dg_eligible_ctx: Vec<minijinja::Value> = dg_eligible
         .iter()
-        .map(|(id, username, name, avatar_path)| {
+        .map(|(id, username, name, avatar_path, avatar_source)| {
             context! {
                 id => id,
                 username => username,
                 name => name,
-                has_avatar => avatar_path.is_some(),
+                has_avatar => show_avatar(avatar_path.as_deref(), avatar_source.as_deref()),
                 initials => compute_initials(name),
             }
         })
@@ -8378,16 +8453,17 @@ async fn edit_group_event_type_form(
     let members_ctx: Vec<minijinja::Value> = if is_round_robin_group || is_collective_team {
         // See the note on the personal-ET edit path: pulling `timezone` makes
         // wrong-TZ users visible on the Member priority list.
-        let members: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
-            "SELECT u.id, u.name, u.avatar_path, u.timezone \
+        let members: Vec<(String, String, Option<String>, Option<String>, String)> =
+            sqlx::query_as(
+                "SELECT u.id, u.name, u.avatar_path, u.avatar_source, u.timezone \
              FROM users u JOIN team_members tm ON tm.user_id = u.id \
              WHERE tm.team_id = ? AND u.enabled = 1 \
              ORDER BY u.name",
-        )
-        .bind(&team_id)
-        .fetch_all(&state.pool)
-        .await
-        .unwrap_or_default();
+            )
+            .bind(&team_id)
+            .fetch_all(&state.pool)
+            .await
+            .unwrap_or_default();
 
         let et_weights: Vec<(String, i64)> = sqlx::query_as(
             "SELECT user_id, weight FROM event_type_member_weights WHERE event_type_id = ?",
@@ -8400,12 +8476,12 @@ async fn edit_group_event_type_form(
 
         members
             .iter()
-            .map(|(uid, name, avatar_path, timezone)| {
+            .map(|(uid, name, avatar_path, avatar_source, timezone)| {
                 let w = wmap.get(uid).copied().unwrap_or(1);
                 context! {
                     user_id => uid,
                     name => name,
-                    has_avatar => avatar_path.is_some(),
+                    has_avatar => show_avatar(avatar_path.as_deref(), avatar_source.as_deref()),
                     initials => compute_initials(name),
                     weight => w,
                     timezone => timezone,
@@ -9028,8 +9104,8 @@ async fn team_profile_page(
             .unwrap_or_default()
         };
 
-    let members: Vec<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT u.id, u.name, u.avatar_path FROM users u \
+    let members: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT u.id, u.name, u.avatar_path, u.avatar_source FROM users u \
          JOIN team_members tm ON tm.user_id = u.id \
          WHERE tm.team_id = ? AND u.enabled = 1 \
          ORDER BY u.name",
@@ -9041,11 +9117,11 @@ async fn team_profile_page(
 
     let members_ctx: Vec<minijinja::Value> = members
         .iter()
-        .map(|(id, name, ap)| {
+        .map(|(id, name, ap, asrc)| {
             context! {
                 id => id,
                 name => name,
-                has_avatar => ap.is_some(),
+                has_avatar => show_avatar(ap.as_deref(), asrc.as_deref()),
                 initials => compute_initials(name),
             }
         })
@@ -9342,8 +9418,8 @@ async fn show_group_slots(
             .flatten();
 
     // Fetch active team members for sidebar display (exclude members with weight=0)
-    let team_members_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT u.id, u.name, u.avatar_path FROM users u \
+    let team_members_rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT u.id, u.name, u.avatar_path, u.avatar_source FROM users u \
          JOIN team_members tm ON tm.user_id = u.id \
          LEFT JOIN event_type_member_weights etw ON etw.user_id = u.id AND etw.event_type_id = ? \
          WHERE tm.team_id = ? AND u.enabled = 1 AND COALESCE(etw.weight, 1) > 0 \
@@ -9357,11 +9433,11 @@ async fn show_group_slots(
 
     let team_members_ctx: Vec<minijinja::Value> = team_members_rows
         .iter()
-        .map(|(uid, uname, ap)| {
+        .map(|(uid, uname, ap, asrc)| {
             context! {
                 id => uid,
                 name => uname,
-                has_avatar => ap.is_some(),
+                has_avatar => show_avatar(ap.as_deref(), asrc.as_deref()),
                 initials => compute_initials(uname),
             }
         })
@@ -10046,18 +10122,20 @@ async fn user_profile(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     )> = sqlx::query_as(
-        "SELECT id, name, title, bio, avatar_path, language FROM users WHERE username = ? AND enabled = 1",
+        "SELECT id, name, title, bio, avatar_path, avatar_source, language FROM users WHERE username = ? AND enabled = 1",
     )
     .bind(&username)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or(None);
 
-    let (user_id, user_name, user_title, user_bio, avatar_path, language) = match user {
-        Some(u) => u,
-        None => return Html("User not found.".to_string()),
-    };
+    let (user_id, user_name, user_title, user_bio, avatar_path, avatar_source, language) =
+        match user {
+            Some(u) => u,
+            None => return Html("User not found.".to_string()),
+        };
     let lang = crate::i18n::resolve(language.as_deref(), &headers);
 
     let event_types: Vec<(String, String, Option<String>, i32)> = sqlx::query_as(
@@ -10092,7 +10170,7 @@ async fn user_profile(
             host_title => user_title,
             host_bio => user_bio.as_deref().map(crate::utils::render_inline_markdown),
             host_user_id => user_id,
-            host_has_avatar => avatar_path.is_some(),
+            host_has_avatar => show_avatar(avatar_path.as_deref(), avatar_source.as_deref()),
             username => username,
             event_types => et_ctx,
             company_link => state.company_link.read().await.clone(),
@@ -10166,7 +10244,7 @@ async fn show_dynamic_group_slots(
     // Build combined host display name
     let host_name = dg_users
         .iter()
-        .map(|(_, _, name, _, _)| name.as_str())
+        .map(|(_, _, name, ..)| name.as_str())
         .collect::<Vec<_>>()
         .join(" & ");
 
@@ -10196,7 +10274,7 @@ async fn show_dynamic_group_slots(
         // sync_if_stale holds a per-source mutex and re-checks staleness,
         // so same-source fan-in collapses to one fetch.
         let mut sync_tasks = tokio::task::JoinSet::new();
-        for (uid, _, _, _, _) in &dg_users {
+        for (uid, ..) in &dg_users {
             let pool = state.pool.clone();
             let key = state.secret_key;
             let uid = uid.clone();
@@ -10211,7 +10289,7 @@ async fn show_dynamic_group_slots(
         let window_end = end_date.and_hms_opt(23, 59, 59).unwrap_or(now_host);
 
         let mut member_busy = HashMap::new();
-        for (i, (uid, _, _, _, _)) in dg_users.iter().enumerate() {
+        for (i, (uid, ..)) in dg_users.iter().enumerate() {
             let et_filter = if i == 0 { Some(et_id.as_str()) } else { None };
             let mut busy_times = fetch_busy_times_for_user(
                 &state.pool,
@@ -10295,11 +10373,11 @@ async fn show_dynamic_group_slots(
                 location_value => loc_value,
             },
             host_name => host_name,
-            dg_members => dg_users.iter().map(|(id, _, name, _, avatar_path)| {
+            dg_members => dg_users.iter().map(|(id, _, name, _, avatar_path, avatar_source)| {
                 context! {
                     id => id,
                     name => name,
-                    has_avatar => avatar_path.is_some(),
+                    has_avatar => show_avatar(avatar_path.as_deref(), avatar_source.as_deref()),
                     initials => compute_initials(name),
                 }
             }).collect::<Vec<_>>(),
@@ -10383,7 +10461,7 @@ async fn show_dynamic_group_book_form(
 
     let host_name = dg_users
         .iter()
-        .map(|(_, _, name, _, _)| name.as_str())
+        .map(|(_, _, name, ..)| name.as_str())
         .collect::<Vec<_>>()
         .join(" & ");
 
@@ -10564,7 +10642,7 @@ async fn handle_dynamic_group_booking(
     let buf_end = slot_end + Duration::minutes(buffer_after as i64);
 
     // Check availability for ALL participants
-    for (i, (uid, uname, _, _, _)) in dg_users.iter().enumerate() {
+    for (i, (uid, uname, ..)) in dg_users.iter().enumerate() {
         let et_filter = if i == 0 { Some(et_id.as_str()) } else { None };
         let mut busy =
             fetch_busy_times_for_user(&state.pool, uid, buf_start, buf_end, host_tz, et_filter)
@@ -10660,7 +10738,7 @@ async fn handle_dynamic_group_booking(
     let co_participant_emails: Vec<String> = dg_users
         .iter()
         .skip(1)
-        .map(|(_, _, _, email, _)| email.clone())
+        .map(|(_, _, _, email, ..)| email.clone())
         .collect();
     let all_additional: Vec<String> = co_participant_emails
         .iter()
@@ -10699,7 +10777,7 @@ async fn handle_dynamic_group_booking(
     let owner_email = dg_users[0].3.clone();
     let host_name = dg_users
         .iter()
-        .map(|(_, _, name, _, _)| name.as_str())
+        .map(|(_, _, name, ..)| name.as_str())
         .collect::<Vec<_>>()
         .join(" & ");
 
@@ -10802,7 +10880,7 @@ async fn handle_dynamic_group_booking(
 
     let host_display = dg_users
         .iter()
-        .map(|(_, _, name, _, _)| name.as_str())
+        .map(|(_, _, name, ..)| name.as_str())
         .collect::<Vec<_>>()
         .join(" & ");
     let date_label = crate::i18n::format_long_date(date, lang);
@@ -10859,18 +10937,20 @@ async fn show_slots_for_user(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     )> = sqlx::query_as(
-        "SELECT id, name, title, avatar_path, language FROM users WHERE username = ? AND enabled = 1",
+        "SELECT id, name, title, avatar_path, avatar_source, language FROM users WHERE username = ? AND enabled = 1",
     )
     .bind(&username)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or(None);
 
-    let (host_user_id, host_name, host_title, host_avatar_path, user_lang) = match user {
-        Some(user) => user,
-        None => return Html("User not found.".to_string()).into_response(),
-    };
+    let (host_user_id, host_name, host_title, host_avatar_path, host_avatar_source, user_lang) =
+        match user {
+            Some(user) => user,
+            None => return Html("User not found.".to_string()).into_response(),
+        };
 
     let lang = crate::i18n::resolve(user_lang.as_deref(), &headers);
 
@@ -11034,7 +11114,7 @@ async fn show_slots_for_user(
             host_name => host_name,
             host_title => host_title.as_deref().unwrap_or(""),
             host_user_id => host_user_id,
-            host_has_avatar => host_avatar_path.is_some(),
+            host_has_avatar => show_avatar(host_avatar_path.as_deref(), host_avatar_source.as_deref()),
             host_initials => compute_initials(&host_name),
             username => username,
             days => days_ctx,
@@ -13018,16 +13098,16 @@ async fn show_slots(
         return Html("This event type requires an invite link.".to_string());
     }
 
-    let host_info: Option<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT u.id, u.name, u.title, u.avatar_path FROM users u JOIN accounts a ON a.user_id = u.id JOIN event_types et ON et.account_id = a.id WHERE et.id = ?",
+    let host_info: Option<(String, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT u.id, u.name, u.title, u.avatar_path, u.avatar_source FROM users u JOIN accounts a ON a.user_id = u.id JOIN event_types et ON et.account_id = a.id WHERE et.id = ?",
     )
     .bind(&et_id)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or(None);
 
-    let (host_user_id, host_name, host_title, host_avatar_path) =
-        host_info.unwrap_or_else(|| ("".to_string(), "Host".to_string(), None, None));
+    let (host_user_id, host_name, host_title, host_avatar_path, host_avatar_source) =
+        host_info.unwrap_or_else(|| ("".to_string(), "Host".to_string(), None, None, None));
 
     // Sync calendars if stale before computing availability
     crate::commands::sync::sync_if_stale(&state.pool, &state.secret_key, &host_user_id).await;
@@ -13117,7 +13197,7 @@ async fn show_slots(
             host_name => &host_name,
             host_title => host_title.as_deref().unwrap_or(""),
             host_user_id => &host_user_id,
-            host_has_avatar => host_avatar_path.is_some(),
+            host_has_avatar => show_avatar(host_avatar_path.as_deref(), host_avatar_source.as_deref()),
             host_initials => compute_initials(&host_name),
             days => days_ctx,
             available_dates => available_dates,
@@ -14589,7 +14669,7 @@ async fn admin_dashboard(
         user_id => current_user.id,
         user_role => "admin",
         user_timezone => current_user.timezone,
-        has_avatar => current_user.avatar_path.is_some(),
+        has_avatar => show_avatar(current_user.avatar_path.as_deref(), current_user.avatar_source.as_deref()),
         user_initials => compute_initials(&current_user.name),
         active => "admin",
         version => env!("CARGO_PKG_VERSION"),
@@ -14785,6 +14865,7 @@ async fn admin_dashboard(
             meeting_webhook_has_secret => meeting_webhook_has_secret,
             meeting_webhook_display_name => meeting_webhook_display_name,
             has_logo => state.data_dir.join("logo.png").exists(),
+            gravatar_enabled => crate::settings::gravatar_enabled(),
             company_link => get_company_link(&state.pool).await.unwrap_or_default(),
             legal_mentions_url => get_legal_mentions_url(&state.pool).await.unwrap_or_default(),
             current_theme => get_theme_name(&state.pool).await,
@@ -14997,6 +15078,37 @@ async fn admin_update_accent(
 
     tracing::info!(admin = %_admin.0.email, theme = %theme, "admin: theme updated");
 
+    Redirect::to("/dashboard/admin").into_response()
+}
+
+#[derive(Deserialize)]
+struct AdminGravatarForm {
+    _csrf: Option<String>,
+    gravatar_enabled: Option<String>,
+}
+
+async fn admin_update_gravatar(
+    State(state): State<Arc<AppState>>,
+    _admin: crate::auth::AdminUser,
+    headers: HeaderMap,
+    Form(form): Form<AdminGravatarForm>,
+) -> impl IntoResponse {
+    if let Err(resp) = verify_csrf_token(&headers, &form._csrf) {
+        return resp;
+    }
+    let gravatar_enabled = form.gravatar_enabled.is_some();
+    if let Err(e) = sqlx::query(
+        "UPDATE auth_config SET gravatar_enabled = ?, updated_at = datetime('now') WHERE id = 'singleton'",
+    )
+    .bind(gravatar_enabled)
+    .execute(&state.pool)
+    .await
+    {
+        return internal_error_response("save gravatar setting", &e);
+    }
+    // Refresh the process-global cache so avatar rendering picks it up at once.
+    crate::settings::load_from_db(&state.pool).await;
+    tracing::info!(admin = %_admin.0.email, gravatar_enabled, "admin: gravatar setting updated");
     Redirect::to("/dashboard/admin").into_response()
 }
 
@@ -17244,11 +17356,12 @@ async fn guest_reschedule_slots(
         String,
         Option<String>,
         Option<String>,
+        Option<String>,
         String,
     )> = sqlx::query_as(
         "SELECT et.id, et.slug, et.duration_min, et.buffer_before, et.buffer_after,
                     et.min_notice_min, et.location_type, et.location_value,
-                    u.id, u.name, u.title, u.avatar_path, et.default_calendar_view
+                    u.id, u.name, u.title, u.avatar_path, u.avatar_source, et.default_calendar_view
              FROM event_types et
              JOIN accounts a ON a.id = et.account_id
              JOIN users u ON u.id = a.user_id
@@ -17272,6 +17385,7 @@ async fn guest_reschedule_slots(
         host_name,
         host_title,
         host_avatar_path,
+        host_avatar_source,
         default_calendar_view,
     ) = match et_info {
         Some(e) => e,
@@ -17422,7 +17536,7 @@ async fn guest_reschedule_slots(
             host_name => host_name,
             host_title => host_title.as_deref().unwrap_or(""),
             host_user_id => host_user_id,
-            host_has_avatar => host_avatar_path.is_some(),
+            host_has_avatar => show_avatar(host_avatar_path.as_deref(), host_avatar_source.as_deref()),
             host_initials => compute_initials(&host_name),
             days => days_ctx,
             available_dates => available_dates,
@@ -26975,6 +27089,21 @@ mod tests {
         assert!(!csp.contains("cdn.jsdelivr.net"));
         assert!(csp.contains("script-src 'self' 'unsafe-inline'"));
         assert!(csp.contains("connect-src 'self'"));
+    }
+
+    #[test]
+    fn build_csp_allows_gravatar_images() {
+        // serve_avatar redirects to gravatar.com; img-src must permit it.
+        let csp = build_csp(&None);
+        assert!(csp.contains("img-src 'self' data: https://www.gravatar.com"));
+    }
+
+    #[test]
+    fn gravatar_url_hashes_normalized_email() {
+        // Known MD5 of "alice@example.com" (Gravatar's canonical example hash).
+        let url = gravatar_url("  Alice@Example.com ");
+        assert!(url.contains("c160f8cc69a4f0bf2b0362752353d060"));
+        assert!(url.starts_with("https://www.gravatar.com/avatar/"));
     }
 
     #[test]
